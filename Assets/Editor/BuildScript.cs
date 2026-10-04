@@ -12,11 +12,20 @@ public static class BuildScript
     [MenuItem("Game/Regenerate Main Scene")]
     public static void CreateScene()
     {
+        const string matPath = "Assets/Resources/Base.mat";
+        if (!File.Exists(matPath))
+        {
+            Directory.CreateDirectory("Assets/Resources");
+            var mat = new Material(Shader.Find("Standard"));
+            mat.SetFloat("_Glossiness", 0.25f);
+            AssetDatabase.CreateAsset(mat, matPath);
+            AssetDatabase.SaveAssets();
+        }
         Directory.CreateDirectory(Path.GetDirectoryName(ScenePath));
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         var cam = new GameObject("Main Camera") { tag = "MainCamera" };
         var c = cam.AddComponent<Camera>();
-        c.orthographic = true;
+        c.orthographic = false;
         c.clearFlags = CameraClearFlags.SolidColor;
         c.backgroundColor = new Color32(24, 28, 40, 255);
         cam.AddComponent<AudioListener>();
