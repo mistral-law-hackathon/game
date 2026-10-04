@@ -3,6 +3,17 @@
 ROOMS = [
     {
         "id": "boss",
+        "claims": [
+            {"id": "b1", "text": "Overtime is passion. I don't pay a cent for it.", "card": "overtime", "evidence": ["payslip"]},
+            {"id": "b2", "text": "A Post-it is a perfectly official way to fire someone.", "card": "procedure", "evidence": ["postit"]},
+            {"id": "b3", "text": "I fire whoever I want. I don't need a reason.", "card": "cause", "evidence": ["postit"]},
+        ],
+        "questions": [
+            {"q": "Is he allowed to not pay my extra hours?", "unlock": "overtime"},
+            {"q": "Can he fire me without giving any reason?", "unlock": "cause"},
+            {"q": "That poster is scary. Can I refuse to work?", "unlock": "withdrawal"},
+        ],
+        
         "title": "Room 1 - The Open Space",
         "background": "bg_office",
         "villain": {
@@ -45,6 +56,17 @@ ROOMS = [
     },
     {
         "id": "hr",
+        "claims": [
+            {"id": "h1", "text": "Your 'PERSONAL' folder is on our laptop, so I can read everything.", "card": "privacy", "evidence": ["chats"]},
+            {"id": "h2", "text": "Clause 13 is totally valid. You signed it, sweetie.", "card": "noncompete", "evidence": ["clause"]},
+            {"id": "h3", "text": "What HR keeps about you is none of your business.", "card": "access", "evidence": ["shredder"]},
+        ],
+        "questions": [
+            {"q": "Can my employer read my private messages?", "unlock": "privacy"},
+            {"q": "Can a contract ban me from working for 10 years?", "unlock": "noncompete"},
+            {"q": "Are my chats a company trade secret?", "unlock": "secrets"},
+        ],
+        
         "title": "Room 2 - Human Resources",
         "background": "bg_hr",
         "villain": {
@@ -63,7 +85,7 @@ ROOMS = [
              "text": "A printout of your WhatsApp-style chat with your sister, in a folder you had named 'PERSONAL'. Sandrine highlighted the juicy parts."},
             {"id": "clause", "label": "Non-compete clause", "card": "noncompete",
              "text": "Clause 13: 'Employee shall not work in ANY industry, ANYWHERE in Europe, for 10 years. Compensation: a heartfelt thank-you.'"},
-            {"id": "shredder", "label": "Shredder", "card": "secrets",
+            {"id": "shredder", "label": "Shredder", "card": "access",
              "text": "In the shredder: your request 'Please send me a copy of the personal data you hold about me'. Sandrine shredded it."},
         ],
         "cards": [
@@ -87,6 +109,17 @@ ROOMS = [
     },
     {
         "id": "landlord",
+        "claims": [
+            {"id": "l1", "text": "I'll return your deposit when I feel like it.", "card": "deadline", "evidence": ["inventory"]},
+            {"id": "l2", "text": "8 years of normal life? Repainting is on you.", "card": "wear", "evidence": ["invoice"]},
+            {"id": "l3", "text": "Landlord law lets me charge 'emotional damage'.", "card": "proof", "evidence": ["invoice"]},
+        ],
+        "questions": [
+            {"q": "How long does he have to give my deposit back?", "unlock": "deadline"},
+            {"q": "Can he charge me 'emotional damage'?", "unlock": "proof"},
+            {"q": "Can he still evict me in winter?", "unlock": "winter"},
+        ],
+        
         "title": "Room 3 - The Exit",
         "background": "bg_exit",
         "villain": {
@@ -136,8 +169,10 @@ def public_rooms():
     out = []
     for r in ROOMS:
         out.append({
-            "id": r["id"], "title": r["title"], "background": r["background"], "intro": r["intro"], "need": r["need"],
+            "id": r["id"], "title": r["title"], "background": r["background"], "intro": r["intro"], "need": len(r["claims"]),
             "villain": {k: r["villain"][k] for k in ("name", "portrait", "opening")},
             "clues": r["clues"], "cards": r["cards"],
+            "claims": [{"id": c["id"], "text": c["text"]} for c in r["claims"]],
+            "questions": [q["q"] for q in r["questions"]],
         })
     return out

@@ -37,6 +37,7 @@ def mistral_json(system, messages, temperature=0.7):
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=45) as resp:
         content = json.loads(resp.read())["choices"][0]["message"]["content"]
+    content = content.replace("\u20ac", " EUR").replace("\u2014", " - ").replace("\u2019", "'")
     return json.loads(content)
 
 
@@ -58,7 +59,7 @@ def mentor(data):
     room = BY_ID[data["room"]]
     found = [c["text"] for c in room["clues"] if c["id"] in data.get("clues", [])]
     system = f"""You are Maitre Pocket, a tiny, witty but kind French lawyer living in the player's phone, in a comedic legal-education game.
-The player is a layperson with NO legal knowledge. Your job is to TEACH: explain the law in plain, friendly language, relate it to the player's situation, and give a concrete everyday example. Max 90 words. No jargon unless you explain it.
+The player is a layperson with NO legal knowledge. Your job is to TEACH: explain the law in plain, friendly language, relate it to the player's situation, and give a concrete everyday example. Max 70 words. No jargon unless you explain it.
 
 Situation: {room['intro']}
 Villain: {room['villain']['persona']}
@@ -76,47 +77,52 @@ Return ONLY JSON: {{"answer": string, "unlock": [card ids]}}"""
     msgs = clean_history(data.get("history")) + [{"role": "user", "content": str(data.get("question", ""))[:600]}]
     out = mistral_json(system, msgs, 0.5)
     valid = {c["id"] for c in room["cards"]}
-    return {"answer": str(out.get("answer", "")), "unlock": [i for i in out.get("unlock", []) if i in valid]}
+    unlock = [i for i in out.get("unlock", []) if i in valid]
+    for q in room["questions"]:
+        if q["q"] == data.get("question") and q["unlock"] not in unlock:
+            unlock.append(q["unlock"])
+    return {"answer": str(out.get("answer", "")), "unlock": unlock}
 
 
-def argue(data):
+def objection(data):
     room = BY_ID[data["room"]]
-    won = [i for i in data.get("won", []) if i in {c["id"] for c in room["cards"] if c["relevant"]}]
+    claim = next(c for c in room["claims"] if c["id"] == data.get("claim"))
     card = next((c for c in room["cards"] if c["id"] == data.get("card")), None)
-    card_txt = (f"The player PLAYED the law card '{card['id']}' ({'applies' if card['relevant'] else 'DECOY, does not apply'}): "
-                f"{card['title']} - {card['plain']}") if card else "The player played no card this turn (free talk)."
-    need = room["need"]
-    system = f"""You run one confrontation in a comedic legal-education game. Two voices:
-1) VILLAIN: {room['villain']['persona']} Stay in character, funny and exaggerated, max 55 words. Sometimes (about 1 turn in 3) bluff with an invented, absurd-but-official-sounding fake law to intimidate.
-2) COACH (Maitre Pocket, kind mentor): judges the player's latest move and TEACHES. Max 45 words, plain language.
+    clue = next((c for c in room["clues"] if c["id"] == data.get("evidence")), None)
+    good_card = card is not None and card["id"] == claim["card"]
+    good_ev = clue is not None and clue["id"] in claim["evidence"]
+    correct = good_card and good_ev
+    right_card = next(c for c in room["cards"] if c["id"] == claim["card"])
+    broken = set(data.get("broken", [])) | ({claim["id"]} if correct else set())
+    done = all(c["id"] in broken for c in room["claims"])
+    verdict = ("CORRECT: law and evidence both fit." if correct else
+               "WRONG LAW (evidence was fine)." if good_ev else
+               "WRONG EVIDENCE (law was right)." if good_card else "WRONG LAW AND WRONG EVIDENCE.")
+    system = f"""You voice two characters in a legal-education game for laypeople. Keep it short and clear.
+VILLAIN: {room['villain']['persona']}
+MENTOR: Maitre Pocket, a calm, kind lawyer who explains in plain language.
 
-Situation: {room['intro']}
-Law cards in this room:
-{cards_text(room)}
-Points already won by the player: {won}. Points needed to escape: {need}.
-{card_txt}
+The villain claimed: "{claim['text']}"
+The player objected with law card: {card['title'] + ' - ' + card['plain'] if card else 'none'}
+and evidence: {clue['label'] + ' - ' + clue['text'] if clue else 'none'}
+The correct answer was law "{right_card['title']}" ({right_card['plain']}) with evidence "{', '.join(claim['evidence'])}".
+Verdict (already decided, do not change it): {verdict}
+{'This was the last claim: the villain gives up and opens the door.' if done else ''}
 
-Judging the player's latest message (be lenient on wording - they are beginners - but strict on whether the law fits):
-- success = true only if the argument uses a card that APPLIES (played or clearly described) AND connects it to the facts of the situation, and that card is not already won.
-- point = id of that card if success, else "".
-- If they used a DECOY or a vague claim ("this is illegal!"), success=false and the coach explains why it does not work and which idea to explore instead (without giving the full answer).
-- called_out_fake = true if the player correctly says a law the villain invented does not exist.
-- If success makes won points reach {need}, the villain's reply is a dramatic, funny SURRENDER and he/she opens the door.
-- mood: 0-100, how cornered/desperate the villain is now.
-Return ONLY JSON: {{"reply": string, "mood": int, "success": bool, "point": string, "coach": string, "fake_law": string (the fake law the villain invented in this reply, or ""), "called_out_fake": bool}}"""
-    msgs = clean_history(data.get("history")) + [{"role": "user", "content": str(data.get("message", ""))[:600]}]
-    out = mistral_json(system, msgs, 0.8)
-    point = out.get("point", "") if out.get("success") else ""
-    if point not in {c["id"] for c in room["cards"] if c["relevant"]} or point in won:
-        point = ""
-    if point:
-        won.append(point)
-    return {
-        "reply": str(out.get("reply", "")), "mood": max(0, min(100, int(out.get("mood", 50) or 0))),
-        "success": bool(point), "point": point, "coach": str(out.get("coach", "")),
-        "fake_law": str(out.get("fake_law", "") or ""), "called_out_fake": bool(out.get("called_out_fake")),
-        "won": won, "door_open": len(won) >= need,
-    }
+Write:
+- "villain": the villain's in-character reaction, max 25 words. If correct: flustered, defeated on this point. If wrong: smug, mocking the bad objection.
+- "mentor": max 45 words. If correct: explain in plain words WHY this law beats the claim, using the evidence's facts. If wrong: explain why the chosen law or evidence does not fit (e.g. decoy law, unrelated evidence) and hint what to look for, without giving the full answer.
+Return ONLY JSON: {{"villain": string, "mentor": string}}"""
+    try:
+        out = mistral_json(system, [{"role": "user", "content": "Generate the lines."}], 0.7)
+    except Exception:
+        out = {}
+    fallback_m = (f"Yes! {right_card['plain']}" if correct else
+                  "Close, but that combination doesn't prove it. Check which law matches the claim and which clue shows the facts.")
+    return {"correct": correct, "good_card": good_card, "good_evidence": good_ev, "done": done,
+            "villain": str(out.get("villain") or ("Grr... fine, that point is yours." if correct else "Ha! Nice try.")),
+            "mentor": str(out.get("mentor") or fallback_m),
+            "card": right_card["id"] if correct else ""}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -141,7 +147,7 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
-        routes = {"/api/mentor": mentor, "/api/argue": argue}
+        routes = {"/api/mentor": mentor, "/api/object": objection}
         fn = routes.get(self.path)
         if not fn:
             return self.send_json({"error": "not found"}, 404)

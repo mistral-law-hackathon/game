@@ -8,81 +8,62 @@ using UnityEngine.Networking;
 [Serializable] public class Villain { public string name, portrait, opening; }
 [Serializable] public class Clue { public string id, label, card, text; }
 [Serializable] public class LawCard { public string id, title, plain, example, law; public bool relevant; }
-[Serializable] public class Room { public string id, title, background, intro; public int need; public Villain villain; public Clue[] clues; public LawCard[] cards; }
+[Serializable] public class Claim { public string id, text; }
+[Serializable] public class Room { public string id, title, intro; public int need; public Villain villain; public Clue[] clues; public LawCard[] cards; public Claim[] claims; public string[] questions; }
 [Serializable] public class RoomsResp { public Room[] rooms; }
 [Serializable] public class Msg { public string role, content; }
 [Serializable] public class MentorReq { public string room, question; public string[] clues; public Msg[] history; }
 [Serializable] public class MentorResp { public string answer, error; public string[] unlock; }
-[Serializable] public class ArgueReq { public string room, card, message; public string[] won; public Msg[] history; }
-[Serializable] public class ArgueResp { public string reply, point, coach, fake_law, error; public int mood; public bool success, called_out_fake, door_open; public string[] won; }
+[Serializable] public class ObjectReq { public string room, claim, card, evidence; public string[] broken; }
+[Serializable] public class ObjectResp { public bool correct, good_card, good_evidence, done; public string villain, mentor, card, error; }
 
 public class LawGame : MonoBehaviour
 {
-    const float W = 1280, H = 720, RoomLen = 14f;
-    enum Phase { Loading, Title, Play, Recap }
-    enum Modal { None, Clue, Mentor, Cards }
+    const float W = 1280, H = 720, Floor = 380, SceneTop = 48, PanelTop = 432;
+    static readonly Color Navy = Hex("#1B2433"), Panel = Hex("#243044"), Line = Hex("#34435C"),
+        Cream = Hex("#F2EADF"), Muted = Hex("#8C99AB"), Coral = Hex("#E8735A");
 
-    class Line { public string who, text; public Color color; }
-    class ClueObj { public Clue clue; public int room; public Transform t; public Floaty f; }
+    enum Phase { Loading, Title, Play, Recap }
+    class Say { public string who, text; public Color color; }
+    class Learned { public string claim; public LawCard card; }
 
     Phase phase = Phase.Loading;
-    Modal modal = Modal.None;
-    bool talking, showIntro;
     Room[] rooms;
     int roomIndex;
     Room R => rooms[roomIndex];
     string loadError;
 
-    // world
-    Camera cam;
-    Transform player;
-    CharacterController cc;
-    Chibi playerChibi, mentorChibi;
-    readonly List<Chibi> villains = new();
-    readonly List<Door> doors = new();
-    readonly List<ClueObj> clueObjs = new();
-    ClueObj nearClue;
-    bool nearVillain;
-
-    // game state
-    readonly List<Line> log = new();
-    readonly List<Msg> villainHistory = new();
+    // room state
+    readonly List<Say> queue = new();
+    float typed;
+    readonly HashSet<string> evidence = new();
+    readonly HashSet<string> cards = new();
+    readonly HashSet<string> broken = new();
+    readonly HashSet<string> asked = new();
+    string selClaim, selCard, selEvidence, detail;
+    bool doorOpen, busy, mentorOpen;
+    float playerX = 90, walkTarget = -1, villainX = 1050, objectionFlash, toastTime;
+    Clue pendingInspect;
+    string toast;
+    readonly List<Say> mentorLog = new();
     readonly List<Msg> mentorHistory = new();
-    readonly List<Line> mentorLog = new();
-    readonly HashSet<string> cluesSeen = new();
-    readonly HashSet<string> cardsUnlocked = new();
-    readonly List<string> won = new();
-    readonly List<LawCard> learned = new();
-    int newCards;
-    Clue openClue;
-    string openCard, selectedCard, toast;
-    float toastTime;
-    string input = "", mentorInput = "";
-    bool busy, doorOpen;
-    int mood = 20, credibility = 100, bluffsCaught;
-    Vector2 logScroll, mentorScroll, cardScroll, chipScroll;
+    string mentorInput = "";
+    Vector2 mentorScroll;
 
-    Texture2D white;
-    GUIStyle sTitle, sBody, sSmall, sBtn, sBox, sField, sBubble, sName, sBig, sTag;
-    float guiScale, guiOx, guiOy;
+    // run state
+    readonly List<Learned> learned = new();
+    int mistakes;
 
-    static readonly Color cVillain = new(1f, 0.55f, 0.45f), cYou = new(0.55f, 0.8f, 1f), cMentor = new(0.5f, 0.9f, 0.65f), cGold = new(1f, 0.85f, 0.3f);
+    Texture2D white, circle;
+    GUIStyle sTitle, sBig, sBody, sSmall, sLabel, sBtn, sBtnSel, sBtnDone, sAccent, sField, sChip;
+    static readonly float[] ClueX = { 260, 500, 740 };
 
-    string Base
-    {
-        get
-        {
-            if (Application.platform != RuntimePlatform.WebGLPlayer || string.IsNullOrEmpty(Application.absoluteURL))
-                return "http://localhost:8080";
-            return new Uri(Application.absoluteURL).GetLeftPart(UriPartial.Authority);
-        }
-    }
+    static Color Hex(string h) { ColorUtility.TryParseHtmlString(h, out var c); return c; }
 
-    void Start()
-    {
-        BuildWorld();
-        StartCoroutine(LoadRooms());
-    }
+    string Base => Application.platform != RuntimePlatform.WebGLPlayer || string.IsNullOrEmpty(Application.absoluteURL)
+        ? "http://localhost:8080" : new Uri(Application.absoluteURL).GetLeftPart(UriPartial.Authority);
+
+    void Start() { StartCoroutine(LoadRooms()); }
 
     IEnumerator LoadRooms()
     {
@@ -90,8 +71,6 @@ public class LawGame : MonoBehaviour
         yield return req.SendWebRequest();
         if (req.result != UnityWebRequest.Result.Success) { loadError = "Could not reach the game server: " + req.error; yield break; }
         rooms = JsonUtility.FromJson<RoomsResp>(req.downloadHandler.text).rooms;
-        BuildRooms();
-        Physics.SyncTransforms();
         phase = Phase.Title;
     }
 
@@ -107,592 +86,382 @@ public class LawGame : MonoBehaviour
         done(res);
     }
 
-    // ---------------- world building ----------------
-
-    void BuildWorld()
-    {
-        cam = Camera.main;
-        cam.clearFlags = CameraClearFlags.SolidColor;
-        cam.backgroundColor = Art.Hex("#BFE6FF");
-        cam.fieldOfView = 45;
-        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
-        RenderSettings.ambientSkyColor = Art.Hex("#E8EEFF");
-        RenderSettings.ambientEquatorColor = Art.Hex("#C9C2D9");
-        RenderSettings.ambientGroundColor = Art.Hex("#8C7F99");
-        var sun = new GameObject("Sun").AddComponent<Light>();
-        sun.type = LightType.Directional;
-        sun.intensity = 0.9f;
-        sun.color = Art.Hex("#FFF4E0");
-        sun.shadows = LightShadows.Soft;
-        sun.shadowStrength = 0.55f;
-        sun.transform.rotation = Quaternion.Euler(55, -30, 0);
-
-        playerChibi = Chibi.Make("player", new Vector3(0, 0.3f, -4.5f), 0);
-        player = playerChibi.transform;
-        cc = player.gameObject.AddComponent<CharacterController>();
-        cc.center = new Vector3(0, 1f, 0); cc.height = 2f; cc.radius = 0.45f;
-        mentorChibi = Chibi.Make("mentor", player.position + new Vector3(-1, 1, 0), 0);
-        mentorChibi.transform.localScale = Vector3.one * 0.45f;
-        mentorChibi.gameObject.AddComponent<Follower>().target = player;
-        cam.transform.position = player.position + new Vector3(0, 9, -8);
-    }
-
-    static readonly string[] Floors = { "#CFE3F2", "#E6D9F5", "#FBE3CF" };
-    static readonly string[] WallsC = { "#8FB8DE", "#B39DDB", "#F4A988" };
-    static readonly string[] Kinds = { "boss", "hr", "landlord" };
-
-    void BuildRooms()
-    {
-        var root = new GameObject("World").transform;
-        int n = rooms.Length;
-        for (int i = 0; i < n; i++)
-        {
-            float z0 = i * RoomLen;
-            Color floor = Art.Hex(Floors[i % 3]), wall = Art.Hex(WallsC[i % 3]);
-            Art.Prim(PrimitiveType.Cube, root, new Vector3(0, -0.1f, z0), new Vector3(14, 0.2f, RoomLen), floor, true);
-            // checker rug
-            Art.Prim(PrimitiveType.Cylinder, root, new Vector3(0, 0.01f, z0 + 1), new Vector3(6, 0.01f, 6), Color.Lerp(floor, Color.white, 0.5f));
-            Art.Prim(PrimitiveType.Cube, root, new Vector3(-7, 1.25f, z0), new Vector3(0.3f, 2.5f, RoomLen), wall, true);
-            Art.Prim(PrimitiveType.Cube, root, new Vector3(7, 1.25f, z0), new Vector3(0.3f, 2.5f, RoomLen), wall, true);
-            if (i == 0) Art.Prim(PrimitiveType.Cube, root, new Vector3(0, 1.25f, z0 - 7), new Vector3(14, 2.5f, 0.3f), wall, true);
-            float zb = z0 + 7;
-            Art.Prim(PrimitiveType.Cube, root, new Vector3(-4.1f, 1.25f, zb), new Vector3(5.8f, 2.5f, 0.3f), wall, true);
-            Art.Prim(PrimitiveType.Cube, root, new Vector3(4.1f, 1.25f, zb), new Vector3(5.8f, 2.5f, 0.3f), wall, true);
-            var door = Art.Prim(PrimitiveType.Cube, root, new Vector3(0, 1.25f, zb), new Vector3(2.4f, 2.5f, 0.25f), Art.Hex("#8D5A3B"), true);
-            Art.Prim(PrimitiveType.Sphere, door.transform, new Vector3(0.35f, 0, -0.6f), new Vector3(0.06f, 0.06f, 0.6f), cGold);
-            doors.Add(door.AddComponent<Door>());
-
-            Decor(root, i, z0);
-
-            var v = Chibi.Make(Kinds[i % 3], new Vector3(0, 0, z0 + 4.6f), 180);
-            v.gameObject.AddComponent<CapsuleCollider>().center = Vector3.up;
-            villains.Add(v);
-
-            Vector3[] spots = { new(-4.8f, 0, z0 + 0.5f), new(4.8f, 0, z0 + 0.5f), new(-4.2f, 0, z0 - 4.5f) };
-            for (int c = 0; c < rooms[i].clues.Length && c < spots.Length; c++) MakeClue(root, rooms[i].clues[c], i, spots[c]);
-        }
-        // outside: freedom garden
-        float zo = n * RoomLen + 4;
-        Art.Prim(PrimitiveType.Cube, root, new Vector3(0, -0.12f, zo), new Vector3(20, 0.2f, 10), Art.Hex("#9BDE7E"), true);
-        for (int t = 0; t < 6; t++)
-        {
-            float x = (t % 2 == 0 ? -1 : 1) * (4 + t);
-            Art.Prim(PrimitiveType.Cylinder, root, new Vector3(x, 0.6f, zo + 2), new Vector3(0.3f, 0.6f, 0.3f), Art.Hex("#8D6E63"));
-            Art.Prim(PrimitiveType.Sphere, root, new Vector3(x, 1.8f, zo + 2), new Vector3(1.6f, 1.6f, 1.6f), Art.Hex("#5FBF5F"));
-        }
-    }
-
-    void Furniture(Transform root, string kind, Vector3 p, float yaw = 0)
-    {
-        var g = new GameObject(kind).transform; g.SetParent(root); g.position = p; g.rotation = Quaternion.Euler(0, yaw, 0);
-        switch (kind)
-        {
-            case "desk":
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 0.75f, 0), new Vector3(2f, 0.12f, 1f), Art.Hex("#F5F0E6"), true);
-                foreach (var x in new[] { -0.9f, 0.9f }) Art.Prim(PrimitiveType.Cube, g, new Vector3(x, 0.35f, 0), new Vector3(0.1f, 0.7f, 0.9f), Art.Hex("#B0A99A"));
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 1.15f, 0.2f), new Vector3(0.8f, 0.5f, 0.06f), Art.Hex("#37474F"));
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 1.15f, 0.16f), new Vector3(0.7f, 0.4f, 0.02f), Art.Hex("#80DEEA"));
-                break;
-            case "plant":
-                Art.Prim(PrimitiveType.Cylinder, g, new Vector3(0, 0.3f, 0), new Vector3(0.5f, 0.3f, 0.5f), Art.Hex("#E57373"), true);
-                Art.Prim(PrimitiveType.Sphere, g, new Vector3(0, 0.95f, 0), new Vector3(0.9f, 0.9f, 0.9f), Art.Hex("#66BB6A"));
-                break;
-            case "cabinet":
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 0.8f, 0), new Vector3(0.8f, 1.6f, 0.7f), Art.Hex("#90A4AE"), true);
-                for (int d = 0; d < 3; d++) Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 0.35f + d * 0.5f, -0.36f), new Vector3(0.3f, 0.06f, 0.04f), Art.Hex("#ECEFF1"));
-                break;
-            case "sofa":
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 0.3f, 0), new Vector3(2.4f, 0.5f, 1f), Art.Hex("#FF8A65"), true);
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 0.75f, 0.4f), new Vector3(2.4f, 0.8f, 0.25f), Art.Hex("#FF7043"));
-                break;
-            case "box":
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 0.35f, 0), new Vector3(0.7f, 0.7f, 0.7f), Art.Hex("#D7B98E"), true);
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 0.71f, 0), new Vector3(0.72f, 0.02f, 0.15f), Art.Hex("#C49A6C"));
-                break;
-            case "cooler":
-                Art.Prim(PrimitiveType.Cube, g, new Vector3(0, 0.55f, 0), new Vector3(0.5f, 1.1f, 0.5f), Color.white, true);
-                Art.Prim(PrimitiveType.Cylinder, g, new Vector3(0, 1.4f, 0), new Vector3(0.4f, 0.3f, 0.4f), Art.Hex("#81D4FA"));
-                break;
-        }
-    }
-
-    void Decor(Transform root, int i, float z0)
-    {
-        switch (i % 3)
-        {
-            case 0:
-                Furniture(root, "desk", new Vector3(-3.5f, 0, z0 + 3.5f)); Furniture(root, "desk", new Vector3(3.5f, 0, z0 + 3.5f));
-                Furniture(root, "desk", new Vector3(3.5f, 0, z0 - 2.5f), 180); Furniture(root, "cooler", new Vector3(6.2f, 0, z0 - 6f));
-                Furniture(root, "plant", new Vector3(-6.2f, 0, z0 + 6.2f)); Furniture(root, "plant", new Vector3(6.2f, 0, z0 + 6.2f));
-                break;
-            case 1:
-                Furniture(root, "cabinet", new Vector3(-6.3f, 0, z0 + 5.5f)); Furniture(root, "cabinet", new Vector3(-6.3f, 0, z0 + 4.6f));
-                Furniture(root, "cabinet", new Vector3(6.3f, 0, z0 - 2f)); Furniture(root, "desk", new Vector3(3.2f, 0, z0 + 3.8f));
-                Furniture(root, "plant", new Vector3(6.2f, 0, z0 + 6.2f)); Furniture(root, "plant", new Vector3(-6.2f, 0, z0 - 6.2f));
-                break;
-            default:
-                Furniture(root, "sofa", new Vector3(-3.8f, 0, z0 + 4.5f)); Furniture(root, "box", new Vector3(4f, 0, z0 + 4.5f));
-                Furniture(root, "box", new Vector3(4.8f, 0, z0 + 3.6f)); Furniture(root, "box", new Vector3(4.4f, 0.7f, z0 + 4.1f));
-                Furniture(root, "plant", new Vector3(6.2f, 0, z0 - 6.2f));
-                break;
-        }
-    }
-
-    void MakeClue(Transform root, Clue clue, int room, Vector3 pos)
-    {
-        var g = new GameObject("Clue_" + clue.id).transform; g.SetParent(root); g.position = pos;
-        var holder = new GameObject("obj").transform; holder.SetParent(g, false);
-        Color col = clue.id switch { "postit" => Art.Hex("#FFEB3B"), "poster" or "flyer" => Art.Hex("#FF80AB"), "chats" => Art.Hex("#4FC3F7"), "shredder" => Art.Hex("#78909C"), _ => Color.white };
-        if (clue.id == "shredder") Art.Prim(PrimitiveType.Cube, holder, Vector3.zero, new Vector3(0.6f, 0.6f, 0.4f), col);
-        else
-        {
-            Art.Prim(PrimitiveType.Cube, holder, Vector3.zero, new Vector3(0.55f, 0.75f, 0.04f), col);
-            for (int l = 0; l < 3; l++) Art.Prim(PrimitiveType.Cube, holder, new Vector3(0, 0.2f - l * 0.15f, -0.03f), new Vector3(0.38f, 0.04f, 0.01f), Art.Hex("#90A4AE"));
-        }
-        Art.Prim(PrimitiveType.Cylinder, g, new Vector3(0, 0.3f, 0), new Vector3(0.5f, 0.3f, 0.5f), Art.Hex("#ECEFF1"), true);
-        var ring = Art.Prim(PrimitiveType.Cylinder, g, new Vector3(0, 0.02f, 0), new Vector3(1.3f, 0.02f, 1.3f), cGold).transform;
-        var f = g.gameObject.AddComponent<Floaty>(); f.baseY = 1.1f; f.SetRing(ring);
-        clueObjs.Add(new ClueObj { clue = clue, room = room, t = g, f = f });
-    }
-
-    // ---------------- game flow ----------------
+    // ---------------- flow ----------------
 
     void EnterRoom(int i)
     {
         roomIndex = i;
-        log.Clear(); villainHistory.Clear(); mentorHistory.Clear(); mentorLog.Clear();
-        cluesSeen.Clear(); cardsUnlocked.Clear(); won.Clear();
-        newCards = 0; openClue = null; openCard = selectedCard = null;
-        input = mentorInput = "";
-        doorOpen = false; mood = 20; talking = false; modal = Modal.None; showIntro = true;
-        Say("", R.intro, new Color(0.85f, 0.85f, 0.9f));
-        Say(R.villain.name, R.villain.opening, cVillain);
-        villainHistory.Add(new Msg { role = "assistant", content = R.villain.opening });
-        mentorLog.Add(new Line { who = "Maitre Pocket", text = "Psst! I'm your pocket lawyer. Look around for glowing clues, then ask me anything, like \"Can he really do that?\". I'll explain the law in plain words and give you law cards.", color = cMentor });
+        queue.Clear(); evidence.Clear(); cards.Clear(); broken.Clear(); asked.Clear();
+        mentorLog.Clear(); mentorHistory.Clear();
+        selClaim = selCard = selEvidence = detail = null;
+        doorOpen = busy = mentorOpen = false;
+        playerX = 90; walkTarget = -1; villainX = 1050; pendingInspect = null;
+        Push("", R.intro, Muted);
+        Push(R.villain.name, R.villain.opening, Coral);
+        Push("Maitre Pocket", i == 0
+            ? "To get out, break each of Gerard's claims. 1) Inspect objects to collect EVIDENCE. 2) Ask me questions to get LAW CARDS. 3) Pick a claim + a law + a piece of evidence, then press OBJECTION."
+            : "Same method: collect evidence, ask me about the law, then object to each claim.", Cream);
+        mentorLog.Add(new Say { who = "Maitre Pocket", text = "Ask me anything in plain words, or pick a question below.", color = Cream });
         phase = Phase.Play;
     }
 
-    void Restart()
+    void Push(string who, string text, Color c) { queue.Add(new Say { who = who, text = text, color = c }); if (queue.Count == 1) typed = 0; }
+
+    void Advance()
     {
-        learned.Clear(); credibility = 100; bluffsCaught = 0;
-        foreach (var d in doors) d.open = false;
-        foreach (var c in clueObjs) c.f.seen = false;
-        foreach (var v in villains) v.cheer = false;
-        cc.enabled = false; player.position = new Vector3(0, 0.3f, -4.5f); cc.enabled = true;
-        EnterRoom(0);
+        if (queue.Count == 0) return;
+        if (typed < queue[0].text.Length) { typed = queue[0].text.Length; return; }
+        queue.RemoveAt(0); typed = 0;
     }
 
-    void Say(string who, string text, Color c) { log.Add(new Line { who = who, text = text, color = c }); logScroll.y = float.MaxValue; }
+    void Toast(string s) { toast = s; toastTime = 3f; }
 
-    void Toast(string s) { toast = s; toastTime = 3.5f; }
-
-    void Unlock(string cardId)
+    void Unlock(string id)
     {
-        if (string.IsNullOrEmpty(cardId) || !cardsUnlocked.Add(cardId)) return;
-        newCards++;
-        var c = R.cards.First(x => x.id == cardId);
-        Toast("New law card: " + c.title);
+        if (string.IsNullOrEmpty(id) || !cards.Add(id)) return;
+        Toast("New law card: " + R.cards.First(c => c.id == id).title);
     }
 
-    void InspectClue(ClueObj c)
+    void Inspect(Clue c)
     {
-        openClue = c.clue; modal = Modal.Clue;
-        c.f.seen = true;
-        if (cluesSeen.Add(c.clue.id)) Unlock(c.clue.card);
+        bool fresh = evidence.Add(c.id);
+        Push("Evidence: " + c.label, c.text, Muted);
+        if (fresh) Unlock(c.card);
     }
 
-    void AskMentor()
+    void AskMentor(string q)
     {
-        var q = mentorInput.Trim();
+        q = q.Trim();
         if (q.Length == 0 || busy) return;
-        mentorInput = ""; busy = true;
-        mentorLog.Add(new Line { who = "You", text = q, color = cYou });
+        busy = true; mentorInput = ""; asked.Add(q);
+        mentorLog.Add(new Say { who = "You", text = q, color = Muted });
         mentorScroll.y = float.MaxValue;
-        var req = new MentorReq { room = R.id, question = q, clues = cluesSeen.ToArray(), history = mentorHistory.ToArray() };
+        var req = new MentorReq { room = R.id, question = q, clues = evidence.ToArray(), history = mentorHistory.ToArray() };
         mentorHistory.Add(new Msg { role = "user", content = q });
         StartCoroutine(Post<MentorResp>("/api/mentor", req, r =>
         {
             busy = false;
-            var text = r == null || !string.IsNullOrEmpty(r.error) ? "Hmm, my connection to the law library dropped. Ask me again?" : r.answer;
-            mentorLog.Add(new Line { who = "Maitre Pocket", text = text, color = cMentor });
-            mentorHistory.Add(new Msg { role = "assistant", content = text });
+            var a = r == null || !string.IsNullOrEmpty(r.error) ? "Sorry, I lost my train of thought. Ask again?" : r.answer;
+            mentorLog.Add(new Say { who = "Maitre Pocket", text = a, color = Cream });
+            mentorHistory.Add(new Msg { role = "assistant", content = a });
             if (r?.unlock != null) foreach (var id in r.unlock) Unlock(id);
             mentorScroll.y = float.MaxValue;
         }));
     }
 
-    void Argue()
+    void Object()
     {
-        var m = input.Trim();
-        if (busy || doorOpen) return;
-        var card = selectedCard != null ? R.cards.First(c => c.id == selectedCard) : null;
-        if (m.Length == 0 && card == null) return;
-        if (m.Length == 0) m = "I invoke this: " + card.title + ".";
-        input = ""; busy = true;
-        Say("You" + (card != null ? "  [plays: " + card.title + "]" : ""), m, cYou);
-        var req = new ArgueReq { room = R.id, card = selectedCard ?? "", message = m, won = won.ToArray(), history = villainHistory.ToArray() };
-        villainHistory.Add(new Msg { role = "user", content = m });
-        StartCoroutine(Post<ArgueResp>("/api/argue", req, r =>
+        if (busy || selClaim == null || selCard == null || selEvidence == null) return;
+        busy = true; objectionFlash = 1.2f;
+        var claim = R.claims.First(c => c.id == selClaim);
+        var req = new ObjectReq { room = R.id, claim = selClaim, card = selCard, evidence = selEvidence, broken = broken.ToArray() };
+        StartCoroutine(Post<ObjectResp>("/api/object", req, r =>
         {
             busy = false;
-            if (r == null || !string.IsNullOrEmpty(r.error)) { Say("", "(The villain is momentarily speechless - network hiccup. Try again.)", Color.gray); return; }
-            Say(R.villain.name, r.reply, cVillain);
-            villainHistory.Add(new Msg { role = "assistant", content = r.reply });
-            mood = r.mood;
-            if (r.called_out_fake) { bluffsCaught++; Say("Bluff busted!", "You spotted a law that doesn't exist. Villains love to sound official.", cGold); }
-            if (r.success)
+            if (r == null || !string.IsNullOrEmpty(r.error)) { Push("", "Connection hiccup. Try again.", Muted); return; }
+            Push(R.villain.name, r.villain, Coral);
+            Push("Maitre Pocket", (r.correct ? "Objection sustained. " : r.good_card ? "Right law, wrong evidence. " : r.good_evidence ? "Good evidence, wrong law. " : "Objection overruled. ") + r.mentor, Cream);
+            if (r.correct)
             {
-                won.Clear(); won.AddRange(r.won);
-                var c = R.cards.First(x => x.id == r.point);
-                if (!learned.Contains(c)) learned.Add(c);
-                selectedCard = null;
-                Toast("Legal point won: " + c.title);
+                broken.Add(claim.id);
+                learned.Add(new Learned { claim = claim.text, card = R.cards.First(c => c.id == r.card) });
+                selClaim = selCard = selEvidence = null; detail = null;
             }
-            else if (card != null) credibility = Mathf.Max(0, credibility - 10);
-            if (!string.IsNullOrEmpty(r.coach)) Say("Maitre Pocket (coach)", r.coach, cMentor);
-            if (!string.IsNullOrEmpty(r.fake_law) && !r.called_out_fake)
-                Say("", "Suspicious... \"" + r.fake_law + "\" - does that law really exist? Ask Maitre Pocket, or call the bluff!", new Color(0.8f, 0.7f, 1f));
-            if (r.door_open)
-            {
-                doorOpen = true; doors[roomIndex].open = true; villains[roomIndex].cheer = true;
-                Say("", "THE DOOR IS OPEN! Press Esc to leave and walk through.", new Color(0.5f, 1f, 0.5f));
-            }
+            else mistakes++;
+            if (r.done) { doorOpen = true; Push("", "The door is open. Walk right to leave the room.", Muted); }
         }));
     }
 
-    // ---------------- per-frame ----------------
+    // ---------------- update ----------------
 
     void Update()
     {
         if (toastTime > 0) toastTime -= Time.deltaTime;
-        if (phase != Phase.Play) { OrbitCamera(); return; }
-
-        bool locked = talking || modal != Modal.None;
-        Vector3 move = Vector3.zero;
-        if (!locked)
+        if (objectionFlash > 0) objectionFlash -= Time.deltaTime;
+        if (phase != Phase.Play) return;
+        if (queue.Count > 0)
         {
-            move = new Vector3(Input.GetAxisRaw("Horizontal"), 0, Input.GetAxisRaw("Vertical"));
-            if (move.sqrMagnitude > 1) move.Normalize();
-            if (move.sqrMagnitude > 0.01f) { showIntro = false; player.rotation = Quaternion.Slerp(player.rotation, Quaternion.LookRotation(move), Time.deltaTime * 12); }
+            typed += Time.deltaTime * 70;
+            if (!mentorOpen && (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.Return))) Advance();
+            return;
         }
-        cc.Move((move * 5.5f + Vector3.down * 9f) * Time.deltaTime);
-        if (player.position.y < -1) { cc.enabled = false; player.position = new Vector3(player.position.x, 0.3f, player.position.z); cc.enabled = true; }
-        playerChibi.body.gameObject.SetActive(!talking);
-        mentorChibi.body.gameObject.SetActive(!talking);
-        playerChibi.speed01 = move.magnitude;
-
-        // nearby interactables
-        nearClue = clueObjs.Where(c => c.room == roomIndex && Flat(c.t.position - player.position) < 2.0f).OrderBy(c => Flat(c.t.position - player.position)).FirstOrDefault();
-        nearVillain = !doorOpen && Flat(villains[roomIndex].transform.position - player.position) < 2.6f;
-
-        if (!locked && Input.GetKeyDown(KeyCode.E))
+        float dir = mentorOpen ? 0 : Input.GetAxisRaw("Horizontal");
+        if (dir != 0) { walkTarget = -1; pendingInspect = null; }
+        else if (walkTarget >= 0)
         {
-            if (nearVillain) { talking = true; showIntro = false; }
-            else if (nearClue != null) InspectClue(nearClue);
+            dir = Mathf.Sign(walkTarget - playerX);
+            if (Mathf.Abs(walkTarget - playerX) < 6) { walkTarget = -1; dir = 0; if (pendingInspect != null) { Inspect(pendingInspect); pendingInspect = null; } }
         }
-        if (!locked && Input.GetKeyDown(KeyCode.M)) modal = Modal.Mentor;
-        if (!locked && Input.GetKeyDown(KeyCode.C)) { modal = Modal.Cards; newCards = 0; }
-        if (Input.GetKeyDown(KeyCode.Escape)) { if (modal != Modal.None) modal = Modal.None; else talking = false; }
-
-        // walking into the next room
-        if (doorOpen && player.position.z > roomIndex * RoomLen + 7.6f)
+        playerX = Mathf.Clamp(playerX + dir * 340 * Time.deltaTime, 60, doorOpen ? 1300 : 960);
+        if (doorOpen) villainX = Mathf.MoveTowards(villainX, 1180, Time.deltaTime * 200);
+        if (!mentorOpen && Input.GetKeyDown(KeyCode.E)) { var c = NearClue(); if (c != null) Inspect(c); }
+        if (doorOpen && playerX > 1240)
         {
-            if (roomIndex + 1 < rooms.Length) EnterRoom(roomIndex + 1);
-            else phase = Phase.Recap;
+            if (roomIndex + 1 < rooms.Length) EnterRoom(roomIndex + 1); else phase = Phase.Recap;
         }
-
-        // villains face the player
-        var v = villains[roomIndex].transform;
-        var d = player.position - v.position; d.y = 0;
-        if (d.sqrMagnitude > 0.01f && !doorOpen) v.rotation = Quaternion.Slerp(v.rotation, Quaternion.LookRotation(d), Time.deltaTime * 3);
-
-        Vector3 camPos, look;
-        if (talking)
-        {
-            var vf = v.forward;
-            var right = -Vector3.Cross(Vector3.up, vf);
-            camPos = v.position + vf * 5f + Vector3.up * 2f + right * 1.6f;
-            look = v.position + Vector3.up * 1.1f + right * 1.6f;
-        }
-        else
-        {
-            camPos = player.position + new Vector3(0, 8.5f, -7.5f);
-            look = player.position + Vector3.up * 0.8f;
-        }
-        cam.transform.position = Vector3.Lerp(cam.transform.position, camPos, Time.deltaTime * 4);
-        cam.transform.rotation = Quaternion.Slerp(cam.transform.rotation, Quaternion.LookRotation(look - cam.transform.position), Time.deltaTime * 6);
     }
 
-    void OrbitCamera()
+    Clue NearClue()
     {
-        float t = Time.time * 0.15f;
-        Vector3 center = phase == Phase.Recap ? new Vector3(0, 0, rooms.Length * RoomLen + 2) : new Vector3(0, 0, 1);
-        if (phase == Phase.Recap)
-        {
-            var target = new Vector3(0, 0, rooms.Length * RoomLen + 3);
-            cc.enabled = false; player.position = target; cc.enabled = true;
-            playerChibi.cheer = true;
-        }
-        var pos = center + new Vector3(Mathf.Sin(t) * 9, 6, -Mathf.Cos(t) * 9);
-        cam.transform.position = Vector3.Lerp(cam.transform.position, pos, Time.deltaTime * 2);
-        cam.transform.rotation = Quaternion.Slerp(cam.transform.rotation, Quaternion.LookRotation(center + Vector3.up - cam.transform.position), Time.deltaTime * 3);
+        for (int i = 0; i < R.clues.Length && i < ClueX.Length; i++) if (Mathf.Abs(ClueX[i] - playerX) < 70) return R.clues[i];
+        return null;
     }
 
-    static float Flat(Vector3 v) { v.y = 0; return v.magnitude; }
-
-    // ---------------- UI ----------------
+    // ---------------- drawing ----------------
 
     void Styles()
     {
         if (sBody != null) return;
         white = Texture2D.whiteTexture;
+        circle = new Texture2D(64, 64) { filterMode = FilterMode.Bilinear };
+        for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++)
+        {
+            float d = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), new Vector2(32, 32));
+            circle.SetPixel(x, y, new Color(1, 1, 1, Mathf.Clamp01(31.5f - d)));
+        }
+        circle.Apply();
         Texture2D Solid(Color c) { var t = new Texture2D(1, 1); t.SetPixel(0, 0, c); t.Apply(); return t; }
-        sTitle = new GUIStyle(GUI.skin.label) { fontSize = 28, fontStyle = FontStyle.Bold, wordWrap = true, richText = true, normal = { textColor = Color.white } };
-        sBig = new GUIStyle(sTitle) { fontSize = 60, alignment = TextAnchor.MiddleCenter };
-        sBody = new GUIStyle(GUI.skin.label) { fontSize = 17, wordWrap = true, richText = true, normal = { textColor = Color.white } };
-        sSmall = new GUIStyle(sBody) { fontSize = 14 };
-        sName = new GUIStyle(sBody) { fontStyle = FontStyle.Bold, fontSize = 15 };
-        sTag = new GUIStyle(sBody) { fontStyle = FontStyle.Bold, fontSize = 16, alignment = TextAnchor.MiddleCenter, normal = { background = Solid(new Color(0.1f, 0.1f, 0.2f, 0.8f)), textColor = Color.white }, padding = new RectOffset(10, 10, 4, 4) };
-        Color b0 = Art.Hex("#FF7AA2"), b1 = Art.Hex("#FF98B8"), b2 = Art.Hex("#E05C86");
-        sBtn = new GUIStyle(GUI.skin.button) { fontSize = 17, fontStyle = FontStyle.Bold, wordWrap = true, normal = { background = Solid(b0), textColor = Color.white }, hover = { background = Solid(b1), textColor = Color.white }, active = { background = Solid(b2), textColor = Color.white } };
-        sBox = new GUIStyle(GUI.skin.box) { normal = { background = Solid(new Color(0.12f, 0.1f, 0.22f, 0.9f)) }, padding = new RectOffset(12, 12, 10, 10) };
-        sBubble = new GUIStyle(sBox) { normal = { background = Solid(new Color(1, 1, 1, 0.08f)) }, padding = new RectOffset(10, 10, 6, 8) };
-        sField = new GUIStyle(GUI.skin.textField) { fontSize = 17, wordWrap = true, padding = new RectOffset(8, 8, 8, 8), normal = { background = Solid(new Color(0.95f, 0.94f, 0.98f)), textColor = Color.black }, focused = { background = Solid(Color.white), textColor = Color.black } };
+        sBody = new GUIStyle(GUI.skin.label) { fontSize = 18, wordWrap = true, richText = true, normal = { textColor = Cream } };
+        sSmall = new GUIStyle(sBody) { fontSize = 14, normal = { textColor = Muted } };
+        sLabel = new GUIStyle(sBody) { fontSize = 12, fontStyle = FontStyle.Bold, normal = { textColor = Muted } };
+        sTitle = new GUIStyle(sBody) { fontSize = 22, fontStyle = FontStyle.Bold };
+        sBig = new GUIStyle(sBody) { fontSize = 54, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+        sAccent = new GUIStyle(sBody) { fontSize = 64, fontStyle = FontStyle.BoldAndItalic, alignment = TextAnchor.MiddleCenter, normal = { textColor = Coral } };
+        GUIStyle Btn(Color bg, Color fg, Color hover) => new(GUI.skin.button)
+        {
+            fontSize = 15, wordWrap = true, alignment = TextAnchor.MiddleLeft, padding = new RectOffset(12, 10, 6, 6),
+            normal = { background = Solid(bg), textColor = fg }, hover = { background = Solid(hover), textColor = fg }, active = { background = Solid(hover), textColor = fg }
+        };
+        sBtn = Btn(Panel, Cream, Line);
+        sBtnSel = Btn(Coral, Navy, Hex("#F08A73"));
+        sBtnDone = Btn(Navy, Muted, Navy);
+        sChip = new GUIStyle(Btn(Navy, Cream, Line)) { fontSize = 13 };
+        sField = new GUIStyle(GUI.skin.textField) { fontSize = 15, padding = new RectOffset(8, 8, 8, 8), normal = { background = Solid(Line), textColor = Cream }, focused = { background = Solid(Line), textColor = Cream } };
     }
+
+    void Rect(float x, float y, float w, float h, Color c) { GUI.color = c; GUI.DrawTexture(new Rect(x, y, w, h), white); GUI.color = Color.white; }
+    void Circle(float cx, float cy, float w, float h, Color c) { GUI.color = c; GUI.DrawTexture(new Rect(cx - w / 2, cy - h / 2, w, h), circle); GUI.color = Color.white; }
 
     void OnGUI()
     {
         Styles();
-        guiScale = Mathf.Min(Screen.width / W, Screen.height / H);
-        guiOx = (Screen.width - W * guiScale) / 2; guiOy = (Screen.height - H * guiScale) / 2;
-        GUI.matrix = Matrix4x4.TRS(new Vector3(guiOx, guiOy, 0), Quaternion.identity, new Vector3(guiScale, guiScale, 1));
+        float s = Mathf.Min(Screen.width / W, Screen.height / H);
+        Rect(0, 0, Screen.width, Screen.height, Navy);
+        GUI.matrix = Matrix4x4.TRS(new Vector3((Screen.width - W * s) / 2, (Screen.height - H * s) / 2, 0), Quaternion.identity, new Vector3(s, s, 1));
         switch (phase)
         {
-            case Phase.Loading: GUI.Label(new Rect(0, 0, W, H), loadError ?? "Loading the courthouse...", new GUIStyle(sBody) { alignment = TextAnchor.MiddleCenter, fontSize = 26, normal = { textColor = Art.Hex("#333355") } }); break;
+            case Phase.Loading: GUI.Label(new Rect(0, 0, W, H), loadError ?? "Loading...", new GUIStyle(sBody) { alignment = TextAnchor.MiddleCenter }); break;
             case Phase.Title: DrawTitle(); break;
             case Phase.Play: DrawPlay(); break;
             case Phase.Recap: DrawRecap(); break;
         }
     }
 
-    bool Key(KeyCode k) => Event.current.type == EventType.KeyDown && Event.current.keyCode == k;
-
-    Vector2 ToGui(Vector3 world)
+    void Figure(float x, float floor, float k, Color body, string kind, float bob)
     {
-        var p = cam.WorldToScreenPoint(world);
-        return new Vector2((p.x - guiOx) / guiScale, (Screen.height - p.y - guiOy) / guiScale);
-    }
-
-    void WorldTag(Vector3 world, string text)
-    {
-        if (Vector3.Dot(world - cam.transform.position, cam.transform.forward) < 0) return;
-        var p = ToGui(world);
-        var size = sTag.CalcSize(new GUIContent(text));
-        GUI.Label(new Rect(p.x - size.x / 2, p.y - size.y, size.x, size.y), text, sTag);
+        float y = floor - bob;
+        Circle(x, y - 45 * k, 72 * k, 92 * k, body);
+        Circle(x, y - 112 * k, 62 * k, 62 * k, body);
+        float face = kind == "player" ? 8 : -8;
+        Circle(x - 11 * k + face * k, y - 114 * k, 8 * k, 8 * k, Navy);
+        Circle(x + 11 * k + face * k, y - 114 * k, 8 * k, 8 * k, Navy);
+        switch (kind)
+        {
+            case "boss": Rect(x - 5 * k, y - 82 * k, 10 * k, 34 * k, Navy); break;
+            case "hr": Rect(x - 24 * k, y - 116 * k, 48 * k, 3 * k, Navy); break;
+            case "landlord": Rect(x - 34 * k, y - 140 * k, 68 * k, 6 * k, Navy); Rect(x - 20 * k, y - 168 * k, 40 * k, 30 * k, Navy); break;
+            case "mentor": Rect(x - 12 * k, y - 80 * k, 24 * k, 12 * k, Cream); break;
+        }
     }
 
     void DrawTitle()
     {
-        GUI.color = new Color(0, 0, 0, 0.35f); GUI.DrawTexture(new Rect(0, 0, W, H), white); GUI.color = Color.white;
-        GUI.Label(new Rect(0, 60, W, 90), "ESCAPE THE CRAZY BOSS", sBig);
-        GUI.Label(new Rect(0, 140, W, 40), "A cozy legal escape game: learn your rights by outsmarting cute-but-terrible villains", new GUIStyle(sBody) { alignment = TextAnchor.MiddleCenter, fontSize = 22 });
-        GUI.Box(new Rect(340, 210, 600, 300), "", sBox);
-        GUILayout.BeginArea(new Rect(365, 225, 550, 280));
-        GUILayout.Label("It's 9 p.m. on your last day. Your boss, HR and your landlord all want something from you. You know nothing about law... yet.", sBody);
-        GUILayout.Space(10);
-        GUILayout.Label("<b>Move</b>  WASD / arrow keys", sBody);
-        GUILayout.Label("<b>Investigate</b>  walk to a glowing clue and press E", sBody);
-        GUILayout.Label("<b>Learn</b>  press M to ask Maitre Pocket, your tiny pocket lawyer", sBody);
-        GUILayout.Label("<b>Argue</b>  walk to the villain, press E, play a law card", sBody);
-        GUILayout.Label("<b>Escape</b>  win enough legal points to open each door", sBody);
-        GUILayout.EndArea();
-        if (GUI.Button(new Rect(W / 2 - 160, 560, 320, 72), "START YOUR ESCAPE", new GUIStyle(sBtn) { fontSize = 22 })) EnterRoom(0);
+        GUI.Label(new Rect(0, 110, W, 70), "ESCAPE THE CRAZY BOSS", sBig);
+        Rect(W / 2 - 60, 190, 120, 4, Coral);
+        GUI.Label(new Rect(0, 210, W, 30), "Learn your rights by objecting to absurd villains.", new GUIStyle(sSmall) { fontSize = 20, alignment = TextAnchor.MiddleCenter });
+        string[] steps = { "THEIR CLAIM", "+  A LAW", "+  EVIDENCE", "=  OBJECTION" };
+        string[] sub = { "\"I don't pay overtime.\"", "Overtime must be paid", "Payslip: 47h worked, 35h paid", "Claim broken" };
+        for (int i = 0; i < 4; i++)
+        {
+            float x = 160 + i * 250;
+            Rect(x, 290, 220, 110, i == 3 ? Coral : Panel);
+            GUI.Label(new Rect(x + 16, 302, 200, 24), steps[i], new GUIStyle(sLabel) { fontSize = 14, normal = { textColor = i == 3 ? Navy : Muted } });
+            GUI.Label(new Rect(x + 16, 330, 196, 60), sub[i], new GUIStyle(sBody) { fontSize = 16, normal = { textColor = i == 3 ? Navy : Cream } });
+        }
+        GUI.Label(new Rect(0, 430, W, 30), "Inspect objects to find evidence. Ask your mentor to learn the law. Then object.", new GUIStyle(sSmall) { fontSize = 17, alignment = TextAnchor.MiddleCenter });
+        if (GUI.Button(new Rect(W / 2 - 120, 500, 240, 56), "START", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontSize = 20, fontStyle = FontStyle.Bold })) EnterRoom(0);
     }
 
     void DrawPlay()
     {
-        if (!talking && modal == Modal.None)
-        {
-            WorldTag(villains[roomIndex].transform.position + Vector3.up * 2.6f, R.villain.name + (nearVillain ? "   [E] Talk" : ""));
-            foreach (var c in clueObjs.Where(c => c.room == roomIndex))
-                if (c == nearClue || !c.f.seen) WorldTag(c.t.position + Vector3.up * 1.9f, (c == nearClue ? "[E] " : c.f.seen ? "" : "? ") + c.clue.label);
-            WorldTag(mentorChibi.transform.position + Vector3.up * 1.2f, "Maitre Pocket [M]");
-        }
+        // top bar
+        GUI.Label(new Rect(24, 12, 600, 30), R.title.ToUpper(), new GUIStyle(sLabel) { fontSize = 15 });
+        GUI.Label(new Rect(680, 12, 576, 30), $"CLAIMS BROKEN  {broken.Count}/{R.claims.Length}", new GUIStyle(sLabel) { fontSize = 15, alignment = TextAnchor.UpperRight });
 
-        // HUD
-        GUI.Box(new Rect(0, 0, W, 52), "", sBox);
-        GUI.Label(new Rect(20, 8, 600, 40), R.title, new GUIStyle(sTitle) { fontSize = 23 });
-        GUI.Label(new Rect(560, 12, 700, 30), $"Legal points: {won.Count}/{R.need}     Credibility: {credibility}%     Room {roomIndex + 1}/{rooms.Length}", new GUIStyle(sBody) { alignment = TextAnchor.MiddleRight, fontSize = 18 });
+        DrawScene();
+        if (queue.Count > 0) DrawDialogue(); else DrawBuilder();
+        if (mentorOpen) DrawMentor();
 
-        if (!talking)
+        if (objectionFlash > 0)
         {
-            if (GUI.Button(new Rect(20, H - 70, 230, 52), "Ask Maitre Pocket [M]", sBtn)) modal = Modal.Mentor;
-            if (GUI.Button(new Rect(260, H - 70, 230, 52), "Law cards [C]" + (newCards > 0 ? $"  ({newCards} new)" : ""), sBtn)) { modal = Modal.Cards; newCards = 0; }
-            GUI.Label(new Rect(510, H - 62, 700, 40), doorOpen ? "<b>The door is open - walk through it!</b>" : "WASD to move  -  E to interact  -  glowing rings are clues", new GUIStyle(sTag) { alignment = TextAnchor.MiddleLeft });
+            GUI.color = new Color(1, 1, 1, Mathf.Clamp01(objectionFlash * 2));
+            GUI.Label(new Rect(0, 150, W, 120), "OBJECTION!", sAccent);
+            GUI.color = Color.white;
         }
-        if (showIntro && !talking && modal == Modal.None)
+        if (toastTime > 0 && toast != null)
         {
-            GUI.Box(new Rect(W / 2 - 330, 80, 660, 140), "", sBox);
-            GUI.Label(new Rect(W / 2 - 310, 92, 620, 120), "<b>" + R.title + "</b>\n" + R.intro, sBody);
-        }
-
-        if (talking) DrawTalk();
-        switch (modal)
-        {
-            case Modal.Clue: DrawClue(); break;
-            case Modal.Mentor: DrawMentor(new Rect(20, 66, 560, 640)); break;
-            case Modal.Cards: DrawCards(new Rect(20, 66, 560, 640)); break;
-        }
-
-        if (toastTime > 0 && !string.IsNullOrEmpty(toast))
-        {
-            var sz = sTag.CalcSize(new GUIContent(toast));
             GUI.color = new Color(1, 1, 1, Mathf.Clamp01(toastTime));
-            GUI.Label(new Rect(W / 2 - sz.x / 2 - 10, H - 140, sz.x + 20, 44), toast, new GUIStyle(sTag) { fontSize = 20, normal = { background = sTag.normal.background, textColor = cGold } });
+            var sz = sBody.CalcSize(new GUIContent(toast));
+            Rect(W / 2 - sz.x / 2 - 16, 60, sz.x + 32, 36, Coral);
+            GUI.Label(new Rect(W / 2 - sz.x / 2, 66, sz.x + 10, 30), toast, new GUIStyle(sBody) { fontSize = 16, normal = { textColor = Navy } });
             GUI.color = Color.white;
         }
     }
 
-    void DrawClue()
+    void DrawScene()
     {
-        var r = new Rect(W / 2 - 280, 190, 560, 320);
-        GUI.Box(r, "", sBox);
-        GUILayout.BeginArea(new Rect(r.x + 20, r.y + 16, r.width - 40, r.height - 30));
-        GUILayout.Label("Clue: " + openClue.label, sTitle);
-        GUILayout.Space(8);
-        GUILayout.Label(openClue.text, new GUIStyle(sBody) { fontSize = 19 });
-        GUILayout.FlexibleSpace();
-        var card = R.cards.First(c => c.id == openClue.card);
-        GUILayout.Label("<color=#ffd75e>This clue hints at a law card: " + card.title + "</color>\nNot sure what it means? Ask Maitre Pocket!", sSmall);
-        GUILayout.Space(6);
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button("Ask Maitre Pocket", sBtn, GUILayout.Height(44))) { modal = Modal.Mentor; mentorInput = "What does the " + openClue.label.ToLower() + " mean for me legally?"; }
-        if (GUILayout.Button("Got it (Esc)", sBtn, GUILayout.Height(44))) modal = Modal.None;
-        GUILayout.EndHorizontal();
-        GUILayout.EndArea();
+        Rect(0, SceneTop, W, Floor - SceneTop, Panel);
+        Rect(0, Floor, W, 2, Line);
+        // door
+        Rect(1150, Floor - 190, 90, 190, doorOpen ? Navy : Line);
+        if (!doorOpen) Circle(1225, Floor - 95, 10, 10, Muted);
+        else GUI.Label(new Rect(1150, Floor - 220, 90, 24), "EXIT  >", new GUIStyle(sLabel) { alignment = TextAnchor.MiddleCenter, normal = { textColor = Coral } });
+
+        var near = queue.Count == 0 ? NearClue() : null;
+        for (int i = 0; i < R.clues.Length && i < ClueX.Length; i++)
+        {
+            var c = R.clues[i]; float x = ClueX[i];
+            Rect(x - 60, Floor - 70, 120, 8, Line);
+            Rect(x - 52, Floor - 62, 6, 62, Line); Rect(x + 46, Floor - 62, 6, 62, Line);
+            Rect(x - 16, Floor - 112, 32, 42, evidence.Contains(c.id) ? Muted : Cream);
+            if (!evidence.Contains(c.id)) Circle(x, Floor - 132 + Mathf.Sin(Time.time * 3 + i) * 4, 12, 12, Coral);
+            GUI.Label(new Rect(x - 90, Floor + 8, 180, 22), (near == c ? "[E] " : "") + c.label, new GUIStyle(sLabel) { alignment = TextAnchor.MiddleCenter, normal = { textColor = near == c ? Coral : Muted } });
+            var hit = new Rect(x - 70, Floor - 150, 140, 190);
+            if (queue.Count == 0 && !mentorOpen && Event.current.type == EventType.MouseDown && hit.Contains(Event.current.mousePosition))
+            { walkTarget = x; pendingInspect = c; Event.current.Use(); }
+        }
+
+        bool walking = walkTarget >= 0 || Mathf.Abs(Input.GetAxisRaw("Horizontal")) > 0;
+        float bob = walking ? Mathf.Abs(Mathf.Sin(Time.time * 12)) * 6 : 0;
+        string vk = R.id == "boss" ? "boss" : R.id == "hr" ? "hr" : "landlord";
+        Figure(villainX, Floor, 1.15f, Coral, vk, doorOpen ? 0 : Mathf.Abs(Mathf.Sin(Time.time * 2)) * 3);
+        GUI.Label(new Rect(villainX - 100, Floor + 8, 200, 22), R.villain.name, new GUIStyle(sLabel) { alignment = TextAnchor.MiddleCenter, normal = { textColor = Coral } });
+        Figure(playerX, Floor, 1f, Cream, "player", bob);
+        Figure(playerX - 70, Floor - 70 + Mathf.Sin(Time.time * 2.5f) * 6, 0.45f, Muted, "mentor", 0);
+        if (queue.Count == 0)
+            GUI.Label(new Rect(24, SceneTop + 12, 700, 24), doorOpen ? "Walk right to leave ->" : "A / D to walk  -  click or press E on an object to inspect it", sSmall);
     }
 
-    void DrawTalk()
+    void DrawDialogue()
     {
-        var r = new Rect(680, 66, 580, 640);
-        GUI.Box(r, "", sBox);
-        GUI.Label(new Rect(r.x + 14, r.y + 8, 300, 30), R.villain.name, new GUIStyle(sTitle) { fontSize = 22, normal = { textColor = cVillain } });
-        GUI.Label(new Rect(r.x + 14, r.y + 40, 140, 22), "Cornered-o-meter", sSmall);
-        GUI.color = new Color(1, 1, 1, 0.15f); GUI.DrawTexture(new Rect(r.x + 150, r.y + 44, 200, 16), white);
-        GUI.color = Color.Lerp(new Color(0.4f, 0.85f, 0.4f), new Color(1f, 0.3f, 0.3f), mood / 100f);
-        GUI.DrawTexture(new Rect(r.x + 150, r.y + 44, 200 * mood / 100f, 16), white); GUI.color = Color.white;
-        if (GUI.Button(new Rect(r.xMax - 210, r.y + 10, 95, 48), "Ask\nPocket", new GUIStyle(sBtn) { fontSize = 14 })) modal = Modal.Mentor;
-        if (GUI.Button(new Rect(r.xMax - 108, r.y + 10, 95, 48), "Leave\n(Esc)", new GUIStyle(sBtn) { fontSize = 14 })) talking = false;
-
-        GUILayout.BeginArea(new Rect(r.x + 8, r.y + 70, r.width - 16, r.height - 270));
-        logScroll = GUILayout.BeginScrollView(logScroll);
-        foreach (var l in log)
-        {
-            GUILayout.BeginVertical(sBubble);
-            if (!string.IsNullOrEmpty(l.who)) { GUI.contentColor = l.color; GUILayout.Label(l.who, sName); GUI.contentColor = Color.white; }
-            GUILayout.Label(l.text, sBody);
-            GUILayout.EndVertical();
-            GUILayout.Space(4);
-        }
-        if (busy) GUILayout.Label("<i>...thinking...</i>", sBody);
-        GUILayout.EndScrollView();
-        GUILayout.EndArea();
-
-        float y = r.yMax - 194;
-        GUI.Label(new Rect(r.x + 12, y, r.width - 24, 22), "Your law cards (pick one, then explain how it fits the facts):", sSmall);
-        var hand = R.cards.Where(c => cardsUnlocked.Contains(c.id)).ToList();
-        GUILayout.BeginArea(new Rect(r.x + 12, y + 24, r.width - 24, 56));
-        chipScroll = GUILayout.BeginScrollView(chipScroll, GUILayout.Height(56));
-        GUILayout.BeginHorizontal();
-        if (hand.Count == 0) GUILayout.Label("<i>No cards yet - inspect clues or ask Maitre Pocket.</i>", sSmall);
-        foreach (var c in hand)
-        {
-            bool isWon = won.Contains(c.id);
-            GUI.backgroundColor = selectedCard == c.id ? cGold : isWon ? new Color(0.5f, 1f, 0.5f) : Color.white;
-            GUI.enabled = !isWon && !doorOpen;
-            if (GUILayout.Button((isWon ? "[won] " : "") + c.title, new GUIStyle(sBtn) { fontSize = 13 }, GUILayout.Width(170), GUILayout.Height(44)))
-                selectedCard = selectedCard == c.id ? null : c.id;
-            GUI.enabled = true; GUI.backgroundColor = Color.white;
-        }
-        GUILayout.EndHorizontal();
-        GUILayout.EndScrollView();
-        GUILayout.EndArea();
-
-        if (modal == Modal.None && (Key(KeyCode.Return) || Key(KeyCode.KeypadEnter)) && GUI.GetNameOfFocusedControl() == "arg") { Argue(); Event.current.Use(); }
-        GUI.SetNextControlName("arg");
-        GUI.enabled = !doorOpen && modal == Modal.None;
-        input = GUI.TextArea(new Rect(r.x + 12, y + 88, r.width - 150, 96), input, 600, sField);
-        if (GUI.Button(new Rect(r.xMax - 128, y + 88, 116, 96), busy ? "..." : "ARGUE!", new GUIStyle(sBtn) { fontSize = 22 })) Argue();
-        GUI.enabled = true;
+        var l = queue[0];
+        Rect(0, PanelTop, W, H - PanelTop, Navy);
+        Rect(80, PanelTop + 30, 4, 140, l.color);
+        GUI.Label(new Rect(104, PanelTop + 26, 900, 28), string.IsNullOrEmpty(l.who) ? "" : l.who.ToUpper(), new GUIStyle(sLabel) { fontSize = 15, normal = { textColor = l.color } });
+        int n = Mathf.Min(l.text.Length, (int)typed);
+        GUI.Label(new Rect(104, PanelTop + 58, 1080, 160), l.text.Substring(0, n), new GUIStyle(sBody) { fontSize = 22 });
+        GUI.Label(new Rect(104, H - 46, 1080, 24), queue.Count > 1 ? $"click to continue  ({queue.Count - 1} more)" : "click to continue", sSmall);
+        if (!mentorOpen && Event.current.type == EventType.MouseDown && Event.current.mousePosition.y > SceneTop) { Advance(); Event.current.Use(); }
     }
 
-    void DrawCards(Rect r)
+    void DrawBuilder()
     {
-        GUI.Box(r, "", sBox);
-        GUI.Label(new Rect(r.x + 14, r.y + 10, 400, 34), "Your law cards", sTitle);
-        if (GUI.Button(new Rect(r.xMax - 110, r.y + 10, 96, 40), "Close", sBtn)) modal = Modal.None;
-        GUILayout.BeginArea(new Rect(r.x + 10, r.y + 60, r.width - 20, r.height - 70));
-        cardScroll = GUILayout.BeginScrollView(cardScroll);
-        if (cardsUnlocked.Count == 0) GUILayout.Label("No law cards yet. Inspect clues or ask Maitre Pocket a question.", sBody);
-        foreach (var c in R.cards.Where(c => cardsUnlocked.Contains(c.id)))
+        Rect(0, PanelTop, W, H - PanelTop, Navy);
+        GUI.Label(new Rect(24, PanelTop + 6, 900, 24), "BUILD YOUR OBJECTION:  pick 1 claim  +  1 law  +  1 piece of evidence", new GUIStyle(sLabel) { fontSize = 14, normal = { textColor = Cream } });
+        float y0 = PanelTop + 36, colW = 380, bh = 40;
+        string[] heads = { "1  WHAT " + R.villain.name.Split(',')[0].ToUpper() + " CLAIMS", "2  YOUR LAW CARDS", "3  YOUR EVIDENCE" };
+        for (int col = 0; col < 3; col++)
         {
-            GUILayout.BeginVertical(sBubble);
-            GUILayout.Label("<b>" + (won.Contains(c.id) ? "[won] " : "") + c.title + "</b>", new GUIStyle(sBody) { fontSize = 19 });
-            GUILayout.Label(c.plain, sBody);
-            GUILayout.Label("<i>Example: " + c.example + "</i>", sSmall);
-            GUILayout.Label("<color=#ffd75e>" + c.law + "</color>", sSmall);
-            GUILayout.EndVertical();
+            float x = 24 + col * (colW + 22);
+            GUI.Label(new Rect(x, y0, colW, 20), heads[col], sLabel);
+            float y = y0 + 24;
+            if (col == 0)
+                foreach (var c in R.claims)
+                {
+                    bool done = broken.Contains(c.id);
+                    var st = done ? sBtnDone : selClaim == c.id ? sBtnSel : sBtn;
+                    if (GUI.Button(new Rect(x, y, colW, bh), (done ? "BROKEN  " : "") + "\"" + c.text + "\"", st) && !done) { selClaim = selClaim == c.id ? null : c.id; }
+                    y += bh + 6;
+                }
+            else if (col == 1)
+            {
+                foreach (var c in R.cards.Where(c => cards.Contains(c.id)))
+                {
+                    if (GUI.Button(new Rect(x, y, colW, 34), c.title, selCard == c.id ? sBtnSel : sBtn)) { selCard = selCard == c.id ? null : c.id; detail = selCard == null ? null : c.title + ": " + c.plain + "  (" + c.law + ")"; }
+                    y += 38;
+                }
+                int locked = R.cards.Length - cards.Count;
+                if (locked > 0) { GUI.Label(new Rect(x, y, colW, 40), $"{locked} card(s) left to discover. Inspect objects or ask the mentor.", sSmall); }
+            }
+            else
+            {
+                foreach (var c in R.clues.Where(c => evidence.Contains(c.id)))
+                {
+                    if (GUI.Button(new Rect(x, y, colW, 34), c.label, selEvidence == c.id ? sBtnSel : sBtn)) { selEvidence = selEvidence == c.id ? null : c.id; detail = selEvidence == null ? null : c.label + ": " + c.text; }
+                    y += 38;
+                }
+                if (evidence.Count < R.clues.Length) GUI.Label(new Rect(x, y, colW, 40), "Inspect objects in the room to collect evidence.", sSmall);
+            }
+        }
+        Rect(24, H - 64, W - 48, 1, Line);
+        GUI.Label(new Rect(24, H - 58, 820, 54), detail ?? "Tip: click a law card or a piece of evidence to read what it means.", new GUIStyle(sSmall) { fontSize = 14, normal = { textColor = detail != null ? Cream : Muted } });
+        if (GUI.Button(new Rect(860, H - 54, 170, 44), "ASK MENTOR", new GUIStyle(sBtn) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold })) mentorOpen = !mentorOpen;
+        bool ready = selClaim != null && selCard != null && selEvidence != null && !busy;
+        int picked = (selClaim != null ? 1 : 0) + (selCard != null ? 1 : 0) + (selEvidence != null ? 1 : 0);
+        if (GUI.Button(new Rect(1040, H - 54, 216, 44), busy ? "..." : ready ? "OBJECTION!" : $"OBJECTION  {picked}/3", new GUIStyle(ready ? sBtnSel : sBtn) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, fontSize = 18, normal = { background = (ready ? sBtnSel : sBtn).normal.background, textColor = ready ? Navy : Muted } }) && ready) Object();
+    }
+
+    void DrawMentor()
+    {
+        var r = new Rect(780, SceneTop + 8, 476, Floor - SceneTop + 40);
+        Rect(r.x, r.y, r.width, r.height, Navy);
+        Rect(r.x, r.y, 4, r.height, Cream);
+        GUI.Label(new Rect(r.x + 20, r.y + 10, 300, 24), "MAITRE POCKET  -  your mentor", new GUIStyle(sLabel) { fontSize = 14, normal = { textColor = Cream } });
+        if (GUI.Button(new Rect(r.xMax - 70, r.y + 8, 60, 26), "close", new GUIStyle(sChip) { alignment = TextAnchor.MiddleCenter })) mentorOpen = false;
+        GUILayout.BeginArea(new Rect(r.x + 20, r.y + 42, r.width - 30, 190));
+        mentorScroll = GUILayout.BeginScrollView(mentorScroll);
+        foreach (var m in mentorLog)
+        {
+            GUILayout.Label(m.who.ToUpper(), new GUIStyle(sLabel) { normal = { textColor = m.color == Cream ? Cream : Muted } });
+            GUILayout.Label(m.text, new GUIStyle(sBody) { fontSize = 15, normal = { textColor = m.color } });
             GUILayout.Space(6);
         }
+        if (busy) GUILayout.Label("thinking...", sSmall);
         GUILayout.EndScrollView();
         GUILayout.EndArea();
-    }
-
-    void DrawMentor(Rect r)
-    {
-        GUI.Box(r, "", sBox);
-        GUI.Label(new Rect(r.x + 14, r.y + 8, 400, 34), "Maitre Pocket", new GUIStyle(sTitle) { normal = { textColor = cMentor } });
-        GUI.Label(new Rect(r.x + 14, r.y + 42, 420, 22), "Ask anything, in plain words. No question is silly.", sSmall);
-        if (GUI.Button(new Rect(r.xMax - 110, r.y + 10, 96, 40), "Close", sBtn)) modal = Modal.None;
-        GUILayout.BeginArea(new Rect(r.x + 8, r.y + 72, r.width - 16, r.height - 190));
-        mentorScroll = GUILayout.BeginScrollView(mentorScroll);
-        foreach (var l in mentorLog)
+        float y = r.y + 238;
+        foreach (var q in R.questions.Where(q => !asked.Contains(q)).Take(3))
         {
-            GUILayout.BeginVertical(sBubble);
-            GUI.contentColor = l.color; GUILayout.Label(l.who, sName); GUI.contentColor = Color.white;
-            GUILayout.Label(l.text, sBody);
-            GUILayout.EndVertical();
-            GUILayout.Space(4);
+            if (GUI.Button(new Rect(r.x + 20, y, r.width - 30, 26), q, sChip)) AskMentor(q);
+            y += 30;
         }
-        if (busy) GUILayout.Label("<i>...flipping through the Code...</i>", sBody);
-        GUILayout.EndScrollView();
-        GUILayout.EndArea();
-        if ((Key(KeyCode.Return) || Key(KeyCode.KeypadEnter)) && GUI.GetNameOfFocusedControl() == "ask") { AskMentor(); Event.current.Use(); }
+        bool enter = Event.current.type == EventType.KeyDown && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter) && GUI.GetNameOfFocusedControl() == "ask";
+        if (enter) { AskMentor(mentorInput); Event.current.Use(); }
         GUI.SetNextControlName("ask");
-        mentorInput = GUI.TextArea(new Rect(r.x + 12, r.yMax - 110, r.width - 120, 98), mentorInput, 600, sField);
-        if (GUI.Button(new Rect(r.xMax - 100, r.yMax - 110, 88, 98), busy ? "..." : "ASK", new GUIStyle(sBtn) { fontSize = 20 })) AskMentor();
+        mentorInput = GUI.TextField(new Rect(r.x + 20, r.yMax - 46, r.width - 110, 36), mentorInput, 300, sField);
+        if (GUI.Button(new Rect(r.xMax - 82, r.yMax - 46, 72, 36), "ASK", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold })) AskMentor(mentorInput);
     }
 
     void DrawRecap()
     {
-        GUI.Label(new Rect(0, 20, W, 80), "YOU ESCAPED!", sBig);
-        GUI.Label(new Rect(0, 92, W, 30), $"Credibility {credibility}%   -   Bluffs busted: {bluffsCaught}   -   Concepts learned: {learned.Count}", new GUIStyle(sTag) { fontSize = 20 });
-        GUI.Box(new Rect(190, 140, 900, 470), "", sBox);
-        GUILayout.BeginArea(new Rect(210, 150, 860, 450));
-        cardScroll = GUILayout.BeginScrollView(cardScroll);
-        GUILayout.Label("What you learned today", sTitle);
-        foreach (var c in learned)
+        GUI.Label(new Rect(0, 40, W, 70), "YOU ESCAPED", sBig);
+        Rect(W / 2 - 60, 112, 120, 4, Coral);
+        GUI.Label(new Rect(0, 124, W, 28), $"{learned.Count} claims broken  -  {mistakes} overruled objections", new GUIStyle(sSmall) { fontSize = 17, alignment = TextAnchor.MiddleCenter });
+        GUILayout.BeginArea(new Rect(180, 170, 920, 450));
+        mentorScroll = GUILayout.BeginScrollView(mentorScroll);
+        GUILayout.Label("WHAT YOU LEARNED", sLabel);
+        foreach (var l in learned)
         {
-            GUILayout.BeginVertical(sBubble);
-            GUILayout.Label("<b>" + c.title + "</b>  <color=#ffd75e>(" + c.law + ")</color>", sBody);
-            GUILayout.Label(c.plain, sBody);
-            GUILayout.Label("<i>In real life: " + c.example + "</i>", sSmall);
-            GUILayout.EndVertical();
-            GUILayout.Space(6);
+            GUILayout.Space(8);
+            GUILayout.Label("They said: \"" + l.claim + "\"", sSmall);
+            GUILayout.Label("<b>" + l.card.title + "</b>  <color=#8C99AB>" + l.card.law + "</color>", sBody);
+            GUILayout.Label(l.card.plain, new GUIStyle(sBody) { fontSize = 15 });
         }
-        GUILayout.Label("<i>This is a simplified game. For a real situation, talk to a lawyer, a union or a free legal aid service (\"Maison de justice et du droit\").</i>", sSmall);
+        GUILayout.Space(12);
+        GUILayout.Label("Simplified for learning. For a real case, talk to a lawyer or a free legal aid service.", sSmall);
         GUILayout.EndScrollView();
         GUILayout.EndArea();
-        if (GUI.Button(new Rect(W / 2 - 140, 630, 280, 64), "PLAY AGAIN", new GUIStyle(sBtn) { fontSize = 22 })) Restart();
+        if (GUI.Button(new Rect(W / 2 - 110, 640, 220, 50), "PLAY AGAIN", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold }))
+        { learned.Clear(); mistakes = 0; EnterRoom(0); }
     }
 }
