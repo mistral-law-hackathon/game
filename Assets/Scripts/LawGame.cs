@@ -200,7 +200,7 @@ public class LawGame : MonoBehaviour
         if (doorOpen) return ("The door is open! Walk to the exit.", L.exit);
         for (int i = 0; i < R.clues.Length; i++)
             if (!evidence.Contains(R.clues[i].id)) return ($"Search the glowing objects for evidence ({evidence.Count}/{R.clues.Length} found).", L.clueAt[i]);
-        if (asked.Count == 0) return ("Ask Maitre Pocket (the little lawyer next to you) what the law says.", mentor);
+        if (asked.Count == 0) return ("Ask Maitre Pocket (the lawyer next to you) what the law says.", mentor);
         return ($"Go back to {VName} and OBJECT: pick his claim + a law + your proof.", L.villain);
     }
 
@@ -323,6 +323,14 @@ public class LawGame : MonoBehaviour
         if (flip) GUI.DrawTextureWithTexCoords(r, t, new Rect(1, 0, -1, 1)); else GUI.DrawTexture(r, t);
     }
 
+    // Upper-body portrait: top 58% of a full-body sprite, bottom-aligned at baseY.
+    void Bust(Texture2D t, float cx, float baseY, float h)
+    {
+        const float f = 0.58f;
+        float w = h * t.width / (t.height * f);
+        GUI.DrawTextureWithTexCoords(new Rect(cx - w / 2, baseY - h, w, h), t, new Rect(0, 1 - f, 1, f));
+    }
+
     // ---------------- GUI ----------------
 
     void OnGUI()
@@ -366,9 +374,9 @@ public class LawGame : MonoBehaviour
         bool walking = walkTime > 0;
         var actors = new List<(float y, Action draw)>
         {
-            (L.villain.y, () => Sprite(villainTex[R.id], L.villain, 200, false, doorOpen ? 0 : Mathf.Abs(Mathf.Sin(Time.time * 2)) * 3)),
-            (player.y, () => Sprite(playerTex, player, 175, faceLeft, walking ? Mathf.Abs(Mathf.Sin(walkTime * 12)) * 6 : 0)),
-            (mentor.y, () => Sprite(mentorTex, mentor, 120, false, Mathf.Sin(Time.time * 2.5f) * 4 + 6)),
+            (L.villain.y, () => Sprite(villainTex[R.id], L.villain, 250, false, doorOpen ? 0 : Mathf.Abs(Mathf.Sin(Time.time * 2)) * 3)),
+            (player.y, () => Sprite(playerTex, player, 230, faceLeft, walking ? Mathf.Abs(Mathf.Sin(walkTime * 12)) * 6 : 0)),
+            (mentor.y, () => Sprite(mentorTex, mentor, 222, false)),
         };
         foreach (var a in actors.OrderBy(a => a.y)) a.draw();
 
@@ -378,7 +386,7 @@ public class LawGame : MonoBehaviour
         Label(new Vector2(mp.x, mp.y + 12), "Maitre Pocket", Brown);
         // plumbob
         var pp = S(player);
-        Tex(new Rect(pp.x - 10, pp.y - 175 * K - 34 + Mathf.Sin(Time.time * 3) * 3, 20, 30), diamond, Green);
+        Tex(new Rect(pp.x - 10, pp.y - 230 * K - 40 + Mathf.Sin(Time.time * 3) * 3, 20, 30), diamond, Green);
 
         if (modal == Modal.None)
         {
@@ -475,7 +483,7 @@ public class LawGame : MonoBehaviour
         string[] steps =
         {
             "Search the glowing objects (?) to collect EVIDENCE.",
-            "Click Maitre Pocket, the little lawyer next to you, to learn the LAW. Each answer can give you a law card.",
+            "Click Maitre Pocket, the lawyer next to you, to learn the LAW. Each answer can give you a law card.",
             $"Talk to {VName}. Pick one of his claims + the law that contradicts it + the evidence that proves it, then press OBJECTION!",
         };
         for (int i = 0; i < 3; i++)
@@ -510,8 +518,7 @@ public class LawGame : MonoBehaviour
     {
         var r = Dim();
         var vt = villainTex[R.id];
-        float pw = 230, ph = Mathf.Min(330, pw * vt.height / vt.width); pw = ph * vt.width / vt.height;
-        GUI.DrawTexture(new Rect(r.x + 130 - pw / 2, r.y + 390 - ph, pw, ph), vt);
+        Bust(vt, r.x + 130, r.y + 390, 340);
         Label(new Vector2(r.x + 130, r.y + 400), R.villain.name, Red);
         float x = r.x + 270, w = r.width - 300, y = r.y + 24;
 
@@ -526,7 +533,7 @@ public class LawGame : MonoBehaviour
             var head = verdict == 1 ? "OBJECTION SUSTAINED - Maitre Pocket explains:" : "OBJECTION OVERRULED - Maitre Pocket explains:";
             float mh = sText.CalcHeight(new GUIContent(mentorLine), w - 90) + 40;
             Box(new Rect(x, y, w, mh), verdict == 1 ? Hex("#E3F2D6") : Hex("#F8E0D8"));
-            GUI.DrawTexture(new Rect(x + 8, y + 8, 50, 50 * mentorTex.height / mentorTex.width > 70 ? 70 : 50), mentorTex, ScaleMode.ScaleToFit);
+            Bust(mentorTex, x + 33, y + 62, 54);
             GUI.Label(new Rect(x + 70, y + 8, w - 80, 20), head, new GUIStyle(sHead) { normal = { textColor = verdict == 1 ? Green : Red } });
             GUI.Label(new Rect(x + 70, y + 30, w - 90, mh - 30), mentorLine, sText);
             y += mh + 12;
@@ -586,8 +593,7 @@ public class LawGame : MonoBehaviour
     void DrawMentor()
     {
         var r = Dim();
-        float ph = 300, pw = ph * mentorTex.width / mentorTex.height;
-        GUI.DrawTexture(new Rect(r.x + 130 - pw / 2, r.y + 70, pw, ph), mentorTex);
+        Bust(mentorTex, r.x + 130, r.y + 390, 320);
         Label(new Vector2(r.x + 130, r.y + 390), "Maitre Pocket", Brown);
         GUI.Label(new Rect(r.x + 30, r.y + 420, 200, 120), "Your pocket lawyer. Ask him anything in plain words. Good questions give you law cards.", sSmall);
         float x = r.x + 270, w = r.width - 300;
