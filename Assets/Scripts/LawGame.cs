@@ -7,7 +7,7 @@ using UnityEngine.Networking;
 
 [Serializable] public class Villain { public string name, portrait, opening; }
 [Serializable] public class Clue { public string id, label, card, text; }
-[Serializable] public class LawCard { public string id, title, plain, example, law; public bool relevant; }
+[Serializable] public class LawCard { public string id, title, plain, example, law, text; public bool relevant; }
 [Serializable] public class Claim { public string id, text; }
 [Serializable] public class Room { public string id, title, intro; public int need; public Villain villain; public Clue[] clues; public LawCard[] cards; public Claim[] claims; public string[] questions; }
 [Serializable] public class RoomsResp { public Room[] rooms; }
@@ -135,7 +135,7 @@ public class LawGame : MonoBehaviour
                 if (evidence.Add(c.id) && !string.IsNullOrEmpty(c.card) && cards.Add(c.card))
                 {
                     var card = R.cards.First(x => x.id == c.card);
-                    extra = "NEW LAW CARD: " + card.title + "\n" + card.plain;
+                    extra = "<b>NEW LAW CARD: " + card.title + "</b>\n<i>" + card.law + ":</i> \"" + card.text + "\"\n\n<b>In simple words:</b> " + card.plain;
                 }
                 Info("EVIDENCE: " + c.label.ToUpper(), c.text, extra);
                 break;
@@ -569,7 +569,12 @@ public class LawGame : MonoBehaviour
 
         // selected card explanation
         var sel = selCard != null ? R.cards.First(c => c.id == selCard) : null;
-        if (sel != null) GUI.Label(new Rect(x, bottom - 40, w - 470, 110), "<b>" + sel.title + ":</b> " + sel.plain, new GUIStyle(sSmall) { fontSize = 13, normal = { textColor = Ink } });
+        if (sel != null)
+        {
+            var lr = new Rect(r.x + 16, r.y + 420, 240, r.yMax - r.y - 432);
+            Box(lr, Hex("#F3E6C8")); Box(new Rect(lr.x, lr.y, 4, lr.height), Green);
+            GUI.Label(new Rect(lr.x + 10, lr.y + 6, lr.width - 16, lr.height - 8), "<b>" + sel.law + "</b>\n\"" + sel.text + "\"", new GUIStyle(sSmall) { fontSize = 12, wordWrap = true, normal = { textColor = Ink } });
+        }
 
         if (Btn(new Rect(r.xMax - 450, r.yMax - 64, 130, 44), "Ask mentor", Center(sBtn))) modal = Modal.Mentor;
         if (Btn(new Rect(r.xMax - 310, r.yMax - 64, 100, 44), "Leave", Center(sBtn))) modal = Modal.None;
@@ -635,7 +640,8 @@ public class LawGame : MonoBehaviour
             GUILayout.Space(10);
             GUILayout.Label("They said: \"" + claim + "\"", sSmall);
             GUILayout.Label("<b>" + card.title + "</b>  <color=#8A7457>" + card.law + "</color>", sText);
-            GUILayout.Label(card.plain, new GUIStyle(sText) { fontSize = 15 });
+            GUILayout.Label("<i>\"" + card.text + "\"</i>", new GUIStyle(sText) { fontSize = 14 });
+            GUILayout.Label("In simple words: " + card.plain, new GUIStyle(sText) { fontSize = 15 });
         }
         GUILayout.Space(14);
         GUILayout.Label("Simplified for learning. For a real case, talk to a lawyer or a free legal aid service.", sSmall);

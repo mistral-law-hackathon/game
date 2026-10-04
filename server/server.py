@@ -44,7 +44,7 @@ def mistral_json(system, messages, temperature=0.7):
 def cards_text(room):
     return "\n".join(
         f"- {c['id']} ({'APPLIES to this situation' if c['relevant'] else 'DECOY: does NOT apply here'}): "
-        f"{c['title']} - {c['plain']} [{c['law']}]" for c in room["cards"])
+        f"{c['title']} - {c['plain']} [{c['law']}] OFFICIAL TEXT: \"{c['text']}\"" for c in room["cards"])
 
 
 def clean_history(history, limit=12):
@@ -59,7 +59,12 @@ def mentor(data):
     room = BY_ID[data["room"]]
     found = [c["text"] for c in room["clues"] if c["id"] in data.get("clues", [])]
     system = f"""You are Maitre Pocket, a tiny, witty but kind French lawyer living in the player's phone, in a comedic legal-education game.
-The player is a layperson with NO legal knowledge. Your job is to TEACH: explain the law in plain, friendly language, relate it to the player's situation, and give a concrete everyday example. Max 70 words. No jargon unless you explain it.
+The player is a layperson with NO legal knowledge. Teach with the OFFICIAL wording of the law, then translate it into very simple words.
+
+ALWAYS answer in exactly this format (plain text, line breaks between parts, max 90 words total):
+THE LAW SAYS (<article reference>): "<a short exact quote, copied word for word from the OFFICIAL TEXT of the most relevant card>"
+IN SIMPLE WORDS: <one short sentence a 12-year-old understands>
+FOR YOU: <one short sentence applying it to the player's facts, with numbers if any>
 
 Situation: {room['intro']}
 Villain: {room['villain']['persona']}
@@ -69,7 +74,8 @@ Law cards in this room:
 {cards_text(room)}
 
 Rules:
-- Answer the player's question. If they ask something vague, guide them toward one useful concept with a question back.
+- Never invent articles or quotes: only quote the OFFICIAL TEXT given above.
+- If the question is vague or off-topic, still use the format with the closest useful card, and end FOR YOU with a hint about what to ask next.
 - "unlock": ids of the cards whose concept your answer actually explains (0-2). If you explain a DECOY, also say clearly why it does not fit this situation.
 - If the villain just used a fake law, you may point out that it does not exist.
 - This is simplified educational information, not legal advice; never mention that disclaimer unless asked.
@@ -105,13 +111,13 @@ MENTOR: Maitre Pocket, a calm, kind lawyer who explains in plain language.
 The villain claimed: "{claim['text']}"
 The player objected with law card: {card['title'] + ' - ' + card['plain'] if card else 'none'}
 and evidence: {clue['label'] + ' - ' + clue['text'] if clue else 'none'}
-The correct answer was law "{right_card['title']}" ({right_card['plain']}) with evidence "{', '.join(claim['evidence'])}".
+The correct answer was law "{right_card['title']}" ({right_card['law']}: "{right_card['text']}") with evidence "{', '.join(claim['evidence'])}".
 Verdict (already decided, do not change it): {verdict}
 {'This was the last claim: the villain gives up and opens the door.' if done else ''}
 
 Write:
 - "villain": the villain's in-character reaction, max 25 words. If correct: flustered, defeated on this point. If wrong: smug, mocking the bad objection.
-- "mentor": max 45 words. If correct: explain in plain words WHY this law beats the claim, using the evidence's facts. If wrong: explain why the chosen law or evidence does not fit (e.g. decoy law, unrelated evidence) and hint what to look for, without giving the full answer.
+- "mentor": max 50 words, very simple words. If correct: start with the article reference and a short exact quote from its official text in double quotes, then one sentence on how the evidence proves the claim is wrong. If wrong: say in one sentence why the chosen law or evidence does not fit, then one hint about what to look for, without giving the full answer.
 Return ONLY JSON: {{"villain": string, "mentor": string}}"""
     try:
         out = mistral_json(system, [{"role": "user", "content": "Generate the lines."}], 0.7)
