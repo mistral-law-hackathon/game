@@ -21,7 +21,7 @@ public static class BuildScript
         c.backgroundColor = new Color32(24, 28, 40, 255);
         cam.AddComponent<AudioListener>();
         cam.transform.position = new Vector3(0, 0, -10);
-        new GameObject("HelloWorld").AddComponent<HelloWorld>();
+        new GameObject("LawGame").AddComponent<LawGame>();
         EditorSceneManager.SaveScene(scene, ScenePath);
         EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(ScenePath, true) };
     }
@@ -29,10 +29,10 @@ public static class BuildScript
     [MenuItem("Game/Build WebGL")]
     public static void BuildWebGL()
     {
-        if (!File.Exists(ScenePath)) CreateScene();
+        CreateScene();
 
         PlayerSettings.companyName = "MistralLawHackathon";
-        PlayerSettings.productName = "Game";
+        PlayerSettings.productName = "Escape the Crazy Boss";
         PlayerSettings.runInBackground = true;
         PlayerSettings.WebGL.compressionFormat = WebGLCompressionFormat.Gzip;
         PlayerSettings.WebGL.decompressionFallback = true;

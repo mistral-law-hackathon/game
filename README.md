@@ -1,21 +1,24 @@
-# Game
+# Escape the Crazy Boss
 
-Unity 6 (6000.0.84f1) project targeting WebGL. Right now it is a single scene that shows "Hello, World!".
+An AI-native legal escape game (Unity 6, WebGL). You are a layperson trapped on your last day at work:
+outsmart an absurd boss, a creepy HR manager and a greedy landlord by **learning** your rights.
+
+Loop per room: **inspect evidence** → **ask Maitre Pocket** (LLM mentor, plain-language explanations) →
+collect **law cards** (some are decoys) → **play a card and argue** against the LLM villain → coach feedback → escape.
+The final screen recaps what you learned.
 
 ## Layout
-- `Assets/Scenes/Main.unity`: main scene (camera + `HelloWorld`)
-- `Assets/Scripts/`: runtime C# scripts
-- `Assets/Editor/BuildScript.cs`: headless build entry point (`BuildScript.BuildWebGL`) and the menu items **Game → Build WebGL** and **Game → Regenerate Main Scene**
+- `Assets/Scripts/LawGame.cs` - the whole game UI (IMGUI) and API calls.
+- `Assets/Resources/Art/` - portraits and backgrounds.
+- `Assets/Editor/BuildScript.cs` - generates the scene and builds WebGL.
+- `server/rooms.py` - fixed scenarios, clues and law cards (source of truth for scoring).
+- `server/server.py` - serves `webgl/` and proxies `/api/mentor` and `/api/argue` to Mistral (key stays server-side).
 
-## Open in the editor
-Open this folder in Unity Hub with editor **6000.0.84f1** and the **WebGL Build Support** module installed.
-
-## Build (headless)
+## Run
 ```bash
-./build.sh          # outputs ./webgl, log in build.log
+cp .env.example .env   # put your MISTRAL_API_KEY in it
+./build.sh             # headless WebGL build into ./webgl (needs an activated Unity license)
+python3 server/server.py   # http://localhost:8080
 ```
 
-## Run locally
-```bash
-cd webgl && python3 -m http.server 8080   # open http://localhost:8080
-```
+Legal references are simplified (French/EU law) for education only; not legal advice.
