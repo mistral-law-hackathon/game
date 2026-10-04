@@ -62,6 +62,7 @@ public class LawGame : MonoBehaviour
     readonly List<(bool me, string text)> chat = new();
     readonly List<Msg> history = new();
     int mistakes;
+    AudioSource voice; bool voiceOn = true; Coroutine speakCo;
     bool talked, doorOpen, busy;
     Vector2 player, mentor, target; bool moving; Act pending; int pendingClue; bool faceLeft;
     float walkTime;
@@ -84,7 +85,31 @@ public class LawGame : MonoBehaviour
         playerTex = Resources.Load<Texture2D>("Art/player");
         mentorTex = Resources.Load<Texture2D>("Art/mentor");
         foreach (var n in new[] { "boss", "hr", "landlord" }) villainTex[n] = Resources.Load<Texture2D>("Art/" + n);
+        voice = gameObject.AddComponent<AudioSource>();
+        if (FindAnyObjectByType<AudioListener>() == null) gameObject.AddComponent<AudioListener>();
         StartCoroutine(LoadRooms());
+    }
+
+    void Say(params (string who, string text)[] lines)
+    {
+        if (speakCo != null) StopCoroutine(speakCo);
+        voice.Stop();
+        if (voiceOn) speakCo = StartCoroutine(SayRoutine(lines));
+    }
+
+    IEnumerator SayRoutine((string who, string text)[] lines)
+    {
+        foreach (var (who, text) in lines)
+        {
+            if (string.IsNullOrEmpty(text)) continue;
+            var url = Base + "/api/tts?who=" + UnityWebRequest.EscapeURL(who) + "&text=" + UnityWebRequest.EscapeURL(text);
+            using var req = UnityWebRequestMultimedia.GetAudioClip(url, AudioType.WAV);
+            yield return req.SendWebRequest();
+            if (req.result != UnityWebRequest.Result.Success) continue;
+            voice.clip = DownloadHandlerAudioClip.GetContent(req);
+            voice.Play();
+            while (voice.isPlaying) yield return null;
+        }
     }
 
     IEnumerator LoadRooms()
@@ -118,6 +143,7 @@ public class LawGame : MonoBehaviour
         talked = doorOpen = busy = moving = false; pending = Act.None;
         selClaim = selCard = selEvidence = null; verdict = 0; mentorLine = null;
         mapTex = Resources.Load<Texture2D>("Art/map_" + R.id);
+        if (voice != null) Say();
         player = L.start; mentor = player + V(-80, 10);
         chat.Add((false, "Bonjour! I'm Maitre Pocket, your pocket lawyer. Ask me anything in plain words, or click a question below."));
         modal = Modal.Intro;
@@ -140,7 +166,7 @@ public class LawGame : MonoBehaviour
                 Info("EVIDENCE: " + c.label.ToUpper(), c.text, extra);
                 break;
             case Act.Villain:
-                if (!talked) { talked = true; villainLine = R.villain.opening; }
+                if (!talked) { talked = true; villainLine = R.villain.opening; Say((R.id, villainLine)); }
                 modal = Modal.Villain; break;
             case Act.Mentor: modal = Modal.Mentor; break;
             case Act.Exit:
@@ -164,6 +190,7 @@ public class LawGame : MonoBehaviour
             busy = false;
             var a = r == null || !string.IsNullOrEmpty(r.error) ? "Sorry, I lost my train of thought. Ask again?" : r.answer;
             history.Add(new Msg { role = "assistant", content = a });
+            Say(("mentor", a));
             var got = new List<string>();
             if (r?.unlock != null) foreach (var id in r.unlock) if (cards.Add(id)) got.Add(R.cards.First(x => x.id == id).title);
             if (got.Count > 0) a += "\n\nNEW LAW CARD: " + string.Join(", ", got);
@@ -182,6 +209,7 @@ public class LawGame : MonoBehaviour
             busy = false;
             if (r == null || !string.IsNullOrEmpty(r.error)) { mentorLine = "Connection hiccup. Try again."; verdict = 2; return; }
             villainLine = r.villain; mentorLine = r.mentor;
+            Say((R.id, villainLine), ("mentor", mentorLine));
             verdict = r.correct ? 1 : 2;
             if (!r.correct) { mistakes++; mentorLine = (r.good_card ? "Right law, but that evidence doesn't prove it. " : r.good_evidence ? "Good evidence, but that law doesn't fit this claim. " : "") + mentorLine; }
             else
@@ -459,6 +487,7 @@ public class LawGame : MonoBehaviour
         GUI.Label(new Rect(x, y, w, 20), $"Law cards:  {cards.Count}/{R.cards.Length}", sSide); y += 30;
 
         GUI.enabled = modal == Modal.None;
+        if (Btn(new Rect(x, H - 160, w, 40), voiceOn ? "Voices: ON" : "Voices: OFF", Center(sBtn))) { voiceOn = !voiceOn; if (!voiceOn) Say(); }
         if (Btn(new Rect(x, H - 112, w, 40), "Ask Maitre Pocket", Center(sBtnSel))) DoAct(Act.Mentor, 0);
         if (Btn(new Rect(x, H - 64, w, 40), "How to play", Center(sBtn))) modal = Modal.Intro;
         GUI.enabled = true;

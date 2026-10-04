@@ -1,6 +1,8 @@
 """Serves the WebGL build and proxies game dialogue to Mistral (the API key stays server-side)."""
 import json
 import os
+import re
+import urllib.parse
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +25,34 @@ def load_env():
 load_env()
 API_KEY = os.environ.get("MISTRAL_API_KEY", "")
 MODEL = os.environ.get("MISTRAL_MODEL", "mistral-medium-latest")
+GRADIUM_KEY = os.environ.get("GRADIUM_API_KEY", "")
+# Gradium flagship voices: Marcus (boss), Marlowe (HR), Garrett (landlord), Declan (mentor)
+VOICES = {"boss": "r2sIQdqqoqgRJuXw", "hr": "Bla6SbVMczYnOhfK", "landlord": "POBHtemksfWQbng0", "mentor": "I7GYfpcKbafFrYUv"}
+TTS_CACHE = {}
+
+
+def speech_text(text):
+    t = text.replace("[...]", " ").replace("THE LAW SAYS", "The law says").replace("IN SIMPLE WORDS:", "In simple words:")
+    t = t.replace("FOR YOU:", "For you:").replace("Art.", "Article").replace("EUR", "euros")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:700]
+
+
+def tts(who, text):
+    voice = VOICES.get(who)
+    if not voice or not GRADIUM_KEY or not text.strip():
+        return None
+    text = speech_text(text)
+    key = (voice, text)
+    if key not in TTS_CACHE:
+        body = json.dumps({"text": text, "voice_id": voice, "output_format": "wav", "only_audio": True}).encode()
+        req = urllib.request.Request("https://api.gradium.ai/api/post/speech/tts", data=body,
+                                     headers={"x-api-key": GRADIUM_KEY, "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            if len(TTS_CACHE) > 200:
+                TTS_CACHE.clear()
+            TTS_CACHE[key] = resp.read()
+    return TTS_CACHE[key]
 
 
 def mistral_json(system, messages, temperature=0.7):
@@ -150,6 +180,21 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/rooms"):
             return self.send_json({"rooms": public_rooms()})
+        if self.path.startswith("/api/tts"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                audio = tts(q.get("who", [""])[0], q.get("text", [""])[0])
+            except Exception as e:
+                self.log_error("tts error: %r", e)
+                audio = None
+            if not audio:
+                return self.send_json({"error": "no audio"}, 503)
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(audio)))
+            self.end_headers()
+            self.wfile.write(audio)
+            return
         return super().do_GET()
 
     def do_POST(self):
