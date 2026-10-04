@@ -19,51 +19,73 @@ using UnityEngine.Networking;
 
 public class LawGame : MonoBehaviour
 {
-    const float W = 1280, H = 720, Floor = 380, SceneTop = 48, PanelTop = 432;
-    static readonly Color Navy = Hex("#1B2433"), Panel = Hex("#243044"), Line = Hex("#34435C"),
-        Cream = Hex("#F2EADF"), Muted = Hex("#8C99AB"), Coral = Hex("#E8735A");
+    const float W = 1280, H = 720, Side = 200, K = 1080f / 1536f;
+    static readonly Color Wood = Hex("#5B3A22"), WoodDark = Hex("#43291A"), Paper = Hex("#FFF4DC"), Ink = Hex("#3A2A1A"),
+        Brown = Hex("#7A5230"), Green = Hex("#5DAA3C"), Red = Hex("#C8553D"), Soft = Hex("#8A7457"), Gold = Hex("#FFD34D");
 
-    enum Phase { Loading, Title, Play, Recap }
-    class Say { public string who, text; public Color color; }
-    class Learned { public string claim; public LawCard card; }
+    class Layout { public Vector2[] clueAt, clueStand; public Vector2 villain, exit, exitStand, start; public Rect walk; public Rect[] blocks; }
+    static readonly Dictionary<string, Layout> Layouts = new()
+    {
+        ["boss"] = new Layout
+        {
+            clueAt = new[] { V(368, 175), V(742, 95), V(1070, 115) }, clueStand = new[] { V(300, 330), V(720, 330), V(1070, 280) },
+            villain = V(1180, 610), exit = V(1380, 860), exitStand = V(1380, 945), start = V(300, 720),
+            walk = new Rect(100, 270, 1340, 685), blocks = new[] { new Rect(1010, 290, 340, 240), new Rect(30, 780, 250, 150), new Rect(1380, 440, 130, 300) }
+        },
+        ["hr"] = new Layout
+        {
+            clueAt = new[] { V(400, 120), V(718, 150), V(1100, 110) }, clueStand = new[] { V(400, 290), V(718, 330), V(1100, 265) },
+            villain = V(1200, 660), exit = V(1460, 800), exitStand = V(1400, 880), start = V(500, 820),
+            walk = new Rect(110, 230, 1310, 740), blocks = new[] { new Rect(565, 90, 300, 200), new Rect(1015, 320, 390, 240), new Rect(70, 600, 300, 330) }
+        },
+        ["landlord"] = new Layout
+        {
+            clueAt = new[] { V(322, 105), V(760, 170), V(1100, 100) }, clueStand = new[] { V(330, 330), V(760, 345), V(1040, 310) },
+            villain = V(1040, 700), exit = V(1410, 740), exitStand = V(1300, 840), start = V(500, 760),
+            walk = new Rect(70, 290, 1350, 615), blocks = new[] { new Rect(1110, 240, 300, 270), new Rect(30, 380, 260, 300), new Rect(50, 720, 130, 140), new Rect(1260, 420, 140, 160) }
+        },
+    };
+    static Vector2 V(float x, float y) => new(x, y);
+
+    enum Phase { Loading, Play }
+    enum Modal { None, Intro, Info, Villain, Mentor, Recap }
+    enum Act { None, Clue, Villain, Mentor, Exit }
 
     Phase phase = Phase.Loading;
-    Room[] rooms;
-    int roomIndex;
+    Modal modal = Modal.Intro;
+    Room[] rooms; int roomIndex; string loadError;
     Room R => rooms[roomIndex];
-    string loadError;
+    Layout L => Layouts[R.id];
 
-    // room state
-    readonly List<Say> queue = new();
-    float typed;
-    readonly HashSet<string> evidence = new();
-    readonly HashSet<string> cards = new();
-    readonly HashSet<string> broken = new();
-    readonly HashSet<string> asked = new();
-    string selClaim, selCard, selEvidence, detail;
-    bool doorOpen, busy, mentorOpen;
-    float playerX = 90, walkTarget = -1, villainX = 1050, objectionFlash, toastTime;
-    Clue pendingInspect;
-    string toast;
-    readonly List<Say> mentorLog = new();
-    readonly List<Msg> mentorHistory = new();
-    string mentorInput = "";
-    Vector2 mentorScroll;
-
-    // run state
-    readonly List<Learned> learned = new();
+    readonly HashSet<string> evidence = new(), cards = new(), broken = new(), asked = new();
+    readonly List<(string claim, LawCard card)> learned = new();
+    readonly List<(bool me, string text)> chat = new();
+    readonly List<Msg> history = new();
     int mistakes;
+    bool talked, doorOpen, busy;
+    Vector2 player, mentor, target; bool moving; Act pending; int pendingClue; bool faceLeft;
+    float walkTime;
 
-    Texture2D white, circle;
-    GUIStyle sTitle, sBig, sBody, sSmall, sLabel, sBtn, sBtnSel, sBtnDone, sAccent, sField, sChip;
-    static readonly float[] ClueX = { 260, 500, 740 };
+    string infoTitle, infoBody, infoExtra;
+    string villainLine, mentorLine; int verdict; // 0 none, 1 sustained, 2 overruled
+    string selClaim, selCard, selEvidence, mentorInput = "";
+    Vector2 chatScroll, recapScroll;
+
+    Texture2D white, circle, diamond, arrow, mapTex, playerTex, mentorTex; readonly Dictionary<string, Texture2D> villainTex = new();
+    GUIStyle sText, sSmall, sHead, sTitle, sSide, sSideHead, sBtn, sBtnSel, sBtnGo, sBtnOff, sField, sTip;
 
     static Color Hex(string h) { ColorUtility.TryParseHtmlString(h, out var c); return c; }
-
     string Base => Application.platform != RuntimePlatform.WebGLPlayer || string.IsNullOrEmpty(Application.absoluteURL)
         ? "http://localhost:8080" : new Uri(Application.absoluteURL).GetLeftPart(UriPartial.Authority);
+    string VName => R.villain.name.Split(',')[0];
 
-    void Start() { StartCoroutine(LoadRooms()); }
+    void Start()
+    {
+        playerTex = Resources.Load<Texture2D>("Art/player");
+        mentorTex = Resources.Load<Texture2D>("Art/mentor");
+        foreach (var n in new[] { "boss", "hr", "landlord" }) villainTex[n] = Resources.Load<Texture2D>("Art/" + n);
+        StartCoroutine(LoadRooms());
+    }
 
     IEnumerator LoadRooms()
     {
@@ -71,7 +93,8 @@ public class LawGame : MonoBehaviour
         yield return req.SendWebRequest();
         if (req.result != UnityWebRequest.Result.Success) { loadError = "Could not reach the game server: " + req.error; yield break; }
         rooms = JsonUtility.FromJson<RoomsResp>(req.downloadHandler.text).rooms;
-        phase = Phase.Title;
+        EnterRoom(0);
+        phase = Phase.Play;
     }
 
     IEnumerator Post<T>(string path, object body, Action<T> done) where T : class
@@ -86,47 +109,46 @@ public class LawGame : MonoBehaviour
         done(res);
     }
 
-    // ---------------- flow ----------------
+    // ---------------- game flow ----------------
 
     void EnterRoom(int i)
     {
         roomIndex = i;
-        queue.Clear(); evidence.Clear(); cards.Clear(); broken.Clear(); asked.Clear();
-        mentorLog.Clear(); mentorHistory.Clear();
-        selClaim = selCard = selEvidence = detail = null;
-        doorOpen = busy = mentorOpen = false;
-        playerX = 90; walkTarget = -1; villainX = 1050; pendingInspect = null;
-        Push("", R.intro, Muted);
-        Push(R.villain.name, R.villain.opening, Coral);
-        Push("Maitre Pocket", i == 0
-            ? "To get out, break each of Gerard's claims. 1) Inspect objects to collect EVIDENCE. 2) Ask me questions to get LAW CARDS. 3) Pick a claim + a law + a piece of evidence, then press OBJECTION."
-            : "Same method: collect evidence, ask me about the law, then object to each claim.", Cream);
-        mentorLog.Add(new Say { who = "Maitre Pocket", text = "Ask me anything in plain words, or pick a question below.", color = Cream });
-        phase = Phase.Play;
+        evidence.Clear(); cards.Clear(); broken.Clear(); asked.Clear(); chat.Clear(); history.Clear();
+        talked = doorOpen = busy = moving = false; pending = Act.None;
+        selClaim = selCard = selEvidence = null; verdict = 0; mentorLine = null;
+        mapTex = Resources.Load<Texture2D>("Art/map_" + R.id);
+        player = L.start; mentor = player + V(-80, 10);
+        chat.Add((false, "Bonjour! I'm Maitre Pocket, your pocket lawyer. Ask me anything in plain words, or click a question below."));
+        modal = Modal.Intro;
     }
 
-    void Push(string who, string text, Color c) { queue.Add(new Say { who = who, text = text, color = c }); if (queue.Count == 1) typed = 0; }
+    void Info(string title, string body, string extra = null) { infoTitle = title; infoBody = body; infoExtra = extra; modal = Modal.Info; }
 
-    void Advance()
+    void DoAct(Act a, int clue)
     {
-        if (queue.Count == 0) return;
-        if (typed < queue[0].text.Length) { typed = queue[0].text.Length; return; }
-        queue.RemoveAt(0); typed = 0;
-    }
-
-    void Toast(string s) { toast = s; toastTime = 3f; }
-
-    void Unlock(string id)
-    {
-        if (string.IsNullOrEmpty(id) || !cards.Add(id)) return;
-        Toast("New law card: " + R.cards.First(c => c.id == id).title);
-    }
-
-    void Inspect(Clue c)
-    {
-        bool fresh = evidence.Add(c.id);
-        Push("Evidence: " + c.label, c.text, Muted);
-        if (fresh) Unlock(c.card);
+        switch (a)
+        {
+            case Act.Clue:
+                var c = R.clues[clue];
+                string extra = null;
+                if (evidence.Add(c.id) && !string.IsNullOrEmpty(c.card) && cards.Add(c.card))
+                {
+                    var card = R.cards.First(x => x.id == c.card);
+                    extra = "NEW LAW CARD: " + card.title + "\n" + card.plain;
+                }
+                Info("EVIDENCE: " + c.label.ToUpper(), c.text, extra);
+                break;
+            case Act.Villain:
+                if (!talked) { talked = true; villainLine = R.villain.opening; }
+                modal = Modal.Villain; break;
+            case Act.Mentor: modal = Modal.Mentor; break;
+            case Act.Exit:
+                if (!doorOpen) Info("THE DOOR IS LOCKED", $"{VName} won't let you leave. Break {R.need} of the {R.claims.Length} claims first: talk to {VName} and OBJECT.");
+                else if (roomIndex + 1 < rooms.Length) EnterRoom(roomIndex + 1);
+                else { modal = Modal.Recap; }
+                break;
+        }
     }
 
     void AskMentor(string q)
@@ -134,334 +156,492 @@ public class LawGame : MonoBehaviour
         q = q.Trim();
         if (q.Length == 0 || busy) return;
         busy = true; mentorInput = ""; asked.Add(q);
-        mentorLog.Add(new Say { who = "You", text = q, color = Muted });
-        mentorScroll.y = float.MaxValue;
-        var req = new MentorReq { room = R.id, question = q, clues = evidence.ToArray(), history = mentorHistory.ToArray() };
-        mentorHistory.Add(new Msg { role = "user", content = q });
+        chat.Add((true, q)); chatScroll.y = 99999;
+        var req = new MentorReq { room = R.id, question = q, clues = evidence.ToArray(), history = history.ToArray() };
+        history.Add(new Msg { role = "user", content = q });
         StartCoroutine(Post<MentorResp>("/api/mentor", req, r =>
         {
             busy = false;
             var a = r == null || !string.IsNullOrEmpty(r.error) ? "Sorry, I lost my train of thought. Ask again?" : r.answer;
-            mentorLog.Add(new Say { who = "Maitre Pocket", text = a, color = Cream });
-            mentorHistory.Add(new Msg { role = "assistant", content = a });
-            if (r?.unlock != null) foreach (var id in r.unlock) Unlock(id);
-            mentorScroll.y = float.MaxValue;
+            history.Add(new Msg { role = "assistant", content = a });
+            var got = new List<string>();
+            if (r?.unlock != null) foreach (var id in r.unlock) if (cards.Add(id)) got.Add(R.cards.First(x => x.id == id).title);
+            if (got.Count > 0) a += "\n\nNEW LAW CARD: " + string.Join(", ", got);
+            chat.Add((false, a)); chatScroll.y = 99999;
         }));
     }
 
     void Object()
     {
         if (busy || selClaim == null || selCard == null || selEvidence == null) return;
-        busy = true; objectionFlash = 1.2f;
+        busy = true;
         var claim = R.claims.First(c => c.id == selClaim);
         var req = new ObjectReq { room = R.id, claim = selClaim, card = selCard, evidence = selEvidence, broken = broken.ToArray() };
         StartCoroutine(Post<ObjectResp>("/api/object", req, r =>
         {
             busy = false;
-            if (r == null || !string.IsNullOrEmpty(r.error)) { Push("", "Connection hiccup. Try again.", Muted); return; }
-            Push(R.villain.name, r.villain, Coral);
-            Push("Maitre Pocket", (r.correct ? "Objection sustained. " : r.good_card ? "Right law, wrong evidence. " : r.good_evidence ? "Good evidence, wrong law. " : "Objection overruled. ") + r.mentor, Cream);
-            if (r.correct)
+            if (r == null || !string.IsNullOrEmpty(r.error)) { mentorLine = "Connection hiccup. Try again."; verdict = 2; return; }
+            villainLine = r.villain; mentorLine = r.mentor;
+            verdict = r.correct ? 1 : 2;
+            if (!r.correct) { mistakes++; mentorLine = (r.good_card ? "Right law, but that evidence doesn't prove it. " : r.good_evidence ? "Good evidence, but that law doesn't fit this claim. " : "") + mentorLine; }
+            else
             {
                 broken.Add(claim.id);
-                learned.Add(new Learned { claim = claim.text, card = R.cards.First(c => c.id == r.card) });
-                selClaim = selCard = selEvidence = null; detail = null;
+                learned.Add((claim.text, R.cards.First(c => c.id == r.card)));
+                selClaim = selCard = selEvidence = null;
             }
-            else mistakes++;
-            if (r.done) { doorOpen = true; Push("", "The door is open. Walk right to leave the room.", Muted); }
+            if (r.done && !doorOpen) { doorOpen = true; mentorLine += "\n\nThe exit door is now open!"; }
         }));
     }
 
-    // ---------------- update ----------------
+    (string text, Vector2 at) Next()
+    {
+        if (!talked) return ($"Talk to {VName} to hear his claims.", L.villain);
+        if (doorOpen) return ("The door is open! Walk to the exit.", L.exit);
+        for (int i = 0; i < R.clues.Length; i++)
+            if (!evidence.Contains(R.clues[i].id)) return ($"Search the glowing objects for evidence ({evidence.Count}/{R.clues.Length} found).", L.clueAt[i]);
+        if (asked.Count == 0) return ("Ask Maitre Pocket (the little lawyer next to you) what the law says.", mentor);
+        return ($"Go back to {VName} and OBJECT: pick his claim + a law + your proof.", L.villain);
+    }
+
+    // ---------------- movement ----------------
+
+    bool Walkable(Vector2 p) => L.walk.Contains(p) && !L.blocks.Any(b => b.Contains(p));
 
     void Update()
     {
-        if (toastTime > 0) toastTime -= Time.deltaTime;
-        if (objectionFlash > 0) objectionFlash -= Time.deltaTime;
-        if (phase != Phase.Play) return;
-        if (queue.Count > 0)
+        if (phase == Phase.Play && modal != Modal.None && modal != Modal.Recap)
         {
-            typed += Time.deltaTime * 70;
-            if (!mentorOpen && (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.Return))) Advance();
-            return;
+            bool esc = Input.GetKeyDown(KeyCode.Escape);
+            bool ok = modal is Modal.Info or Modal.Intro && (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.Space));
+            if (esc || ok) modal = Modal.None;
         }
-        float dir = mentorOpen ? 0 : Input.GetAxisRaw("Horizontal");
-        if (dir != 0) { walkTarget = -1; pendingInspect = null; }
-        else if (walkTarget >= 0)
+        if (phase != Phase.Play || modal != Modal.None) { walkTime = 0; return; }
+        var dir = new Vector2(Input.GetAxisRaw("Horizontal"), -Input.GetAxisRaw("Vertical"));
+        if (dir != Vector2.zero) { moving = false; pending = Act.None; }
+        else if (moving)
         {
-            dir = Mathf.Sign(walkTarget - playerX);
-            if (Mathf.Abs(walkTarget - playerX) < 6) { walkTarget = -1; dir = 0; if (pendingInspect != null) { Inspect(pendingInspect); pendingInspect = null; } }
+            var d = target - player;
+            if (d.magnitude < 8) { Arrive(); }
+            else dir = d.normalized;
         }
-        playerX = Mathf.Clamp(playerX + dir * 340 * Time.deltaTime, 60, doorOpen ? 1300 : 960);
-        if (doorOpen) villainX = Mathf.MoveTowards(villainX, 1180, Time.deltaTime * 200);
-        if (!mentorOpen && Input.GetKeyDown(KeyCode.E)) { var c = NearClue(); if (c != null) Inspect(c); }
-        if (doorOpen && playerX > 1240)
+        if (dir != Vector2.zero)
         {
-            if (roomIndex + 1 < rooms.Length) EnterRoom(roomIndex + 1); else phase = Phase.Recap;
+            var step = dir.normalized * 420 * Time.deltaTime;
+            var before = player;
+            if (Walkable(player + step)) player += step;
+            else if (Walkable(player + V(step.x, 0))) player += V(step.x, 0);
+            else if (Walkable(player + V(0, step.y))) player += V(0, step.y);
+            if (Mathf.Abs(step.x) > 0.5f) faceLeft = step.x < 0;
+            if ((player - before).sqrMagnitude < 0.01f && moving) Arrive();
+            walkTime += Time.deltaTime;
         }
+        else walkTime = 0;
+        mentor = Vector2.Lerp(mentor, player + V(faceLeft ? 80 : -80, 10), Time.deltaTime * 4);
+        if (Input.GetKeyDown(KeyCode.E)) { var (a, c, p) = HitNear(player, 170); if (a != Act.None) DoAct(a, c); }
     }
 
-    Clue NearClue()
+    void Arrive()
     {
-        for (int i = 0; i < R.clues.Length && i < ClueX.Length; i++) if (Mathf.Abs(ClueX[i] - playerX) < 70) return R.clues[i];
-        return null;
+        moving = false;
+        var a = pending; pending = Act.None;
+        if (a == Act.None) return;
+        var spot = a == Act.Clue ? L.clueStand[pendingClue] : a == Act.Villain ? L.villain : a == Act.Exit ? L.exitStand : player;
+        if ((spot - player).magnitude < 220) DoAct(a, pendingClue);
     }
 
-    // ---------------- drawing ----------------
+    (Act, int, Vector2) HitNear(Vector2 p, float r)
+    {
+        for (int i = 0; i < R.clues.Length; i++)
+            if ((L.clueStand[i] - p).magnitude < r || (L.clueAt[i] - p).magnitude < r) return (Act.Clue, i, L.clueStand[i]);
+        if ((L.villain - p).magnitude < r) return (Act.Villain, 0, L.villain);
+        if ((L.exitStand - p).magnitude < r) return (Act.Exit, 0, L.exitStand);
+        return (Act.None, 0, p);
+    }
+
+    (Act act, int clue, string label) HitAt(Vector2 p)
+    {
+        if (Rect.MinMaxRect(mentor.x - 45, mentor.y - 130, mentor.x + 45, mentor.y).Contains(p)) return (Act.Mentor, 0, "Ask Maitre Pocket");
+        if (Rect.MinMaxRect(L.villain.x - 70, L.villain.y - 200, L.villain.x + 70, L.villain.y).Contains(p)) return (Act.Villain, 0, "Talk to " + VName);
+        for (int i = 0; i < R.clues.Length; i++)
+            if ((L.clueAt[i] - p).magnitude < 95) return (Act.Clue, i, (evidence.Contains(R.clues[i].id) ? "Look again: " : "Inspect: ") + R.clues[i].label);
+        if ((L.exit - p).magnitude < 110) return (Act.Exit, 0, doorOpen ? "Leave the room" : "Exit (locked)");
+        return (Act.None, 0, null);
+    }
+
+    // ---------------- drawing helpers ----------------
+
+    static Texture2D Shape(Func<float, float, float> a)
+    {
+        var t = new Texture2D(64, 64) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+        for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) t.SetPixel(x, y, new Color(1, 1, 1, Mathf.Clamp01(a((x + 0.5f) / 64f * 2 - 1, (y + 0.5f) / 64f * 2 - 1))));
+        t.Apply(); return t;
+    }
+    static Texture2D Solid(Color c) { var t = new Texture2D(1, 1); t.SetPixel(0, 0, c); t.Apply(); return t; }
 
     void Styles()
     {
-        if (sBody != null) return;
+        if (sText != null) return;
         white = Texture2D.whiteTexture;
-        circle = new Texture2D(64, 64) { filterMode = FilterMode.Bilinear };
-        for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++)
+        circle = Shape((x, y) => (1 - Mathf.Sqrt(x * x + y * y)) * 32);
+        diamond = Shape((x, y) => (1 - Mathf.Abs(x) - Mathf.Abs(y) * 0.5f) * 32);
+        arrow = Shape((x, y) => Mathf.Min((y + 1) * 0.5f * 1 - Mathf.Abs(x) * 0.9f + 0.05f, 1) * 32);
+        sText = new GUIStyle(GUI.skin.label) { fontSize = 17, wordWrap = true, richText = true, normal = { textColor = Ink } };
+        sSmall = new GUIStyle(sText) { fontSize = 14, normal = { textColor = Soft } };
+        sHead = new GUIStyle(sText) { fontSize = 14, fontStyle = FontStyle.Bold, normal = { textColor = Brown } };
+        sTitle = new GUIStyle(sText) { fontSize = 26, fontStyle = FontStyle.Bold };
+        sSide = new GUIStyle(sText) { fontSize = 13, normal = { textColor = Paper } };
+        sSideHead = new GUIStyle(sSide) { fontSize = 12, fontStyle = FontStyle.Bold, normal = { textColor = Gold } };
+        GUIStyle Btn(Color bg, Color fg, Color hov) => new(GUI.skin.button)
         {
-            float d = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), new Vector2(32, 32));
-            circle.SetPixel(x, y, new Color(1, 1, 1, Mathf.Clamp01(31.5f - d)));
-        }
-        circle.Apply();
-        Texture2D Solid(Color c) { var t = new Texture2D(1, 1); t.SetPixel(0, 0, c); t.Apply(); return t; }
-        sBody = new GUIStyle(GUI.skin.label) { fontSize = 18, wordWrap = true, richText = true, normal = { textColor = Cream } };
-        sSmall = new GUIStyle(sBody) { fontSize = 14, normal = { textColor = Muted } };
-        sLabel = new GUIStyle(sBody) { fontSize = 12, fontStyle = FontStyle.Bold, normal = { textColor = Muted } };
-        sTitle = new GUIStyle(sBody) { fontSize = 22, fontStyle = FontStyle.Bold };
-        sBig = new GUIStyle(sBody) { fontSize = 54, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
-        sAccent = new GUIStyle(sBody) { fontSize = 64, fontStyle = FontStyle.BoldAndItalic, alignment = TextAnchor.MiddleCenter, normal = { textColor = Coral } };
-        GUIStyle Btn(Color bg, Color fg, Color hover) => new(GUI.skin.button)
-        {
-            fontSize = 15, wordWrap = true, alignment = TextAnchor.MiddleLeft, padding = new RectOffset(12, 10, 6, 6),
-            normal = { background = Solid(bg), textColor = fg }, hover = { background = Solid(hover), textColor = fg }, active = { background = Solid(hover), textColor = fg }
+            fontSize = 14, wordWrap = true, alignment = TextAnchor.MiddleLeft, padding = new RectOffset(10, 8, 6, 6), border = new RectOffset(0, 0, 0, 0),
+            normal = { background = Solid(bg), textColor = fg }, hover = { background = Solid(hov), textColor = fg }, active = { background = Solid(hov), textColor = fg }
         };
-        sBtn = Btn(Panel, Cream, Line);
-        sBtnSel = Btn(Coral, Navy, Hex("#F08A73"));
-        sBtnDone = Btn(Navy, Muted, Navy);
-        sChip = new GUIStyle(Btn(Navy, Cream, Line)) { fontSize = 13 };
-        sField = new GUIStyle(GUI.skin.textField) { fontSize = 15, padding = new RectOffset(8, 8, 8, 8), normal = { background = Solid(Line), textColor = Cream }, focused = { background = Solid(Line), textColor = Cream } };
+        sBtn = Btn(Hex("#F3E2BF"), Ink, Hex("#EBD3A3"));
+        sBtnSel = Btn(Green, Color.white, Hex("#6DBA4B"));
+        sBtnGo = new GUIStyle(Btn(Red, Color.white, Hex("#D96650"))) { alignment = TextAnchor.MiddleCenter, fontSize = 20, fontStyle = FontStyle.Bold };
+        sBtnOff = Btn(Hex("#E6DCC8"), Hex("#A89A80"), Hex("#E6DCC8"));
+        sField = new GUIStyle(GUI.skin.textField) { fontSize = 15, padding = new RectOffset(8, 8, 8, 8), normal = { background = Solid(Color.white), textColor = Ink }, focused = { background = Solid(Color.white), textColor = Ink } };
+        sTip = new GUIStyle(sText) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, normal = { textColor = Color.white } };
     }
 
-    void Rect(float x, float y, float w, float h, Color c) { GUI.color = c; GUI.DrawTexture(new Rect(x, y, w, h), white); GUI.color = Color.white; }
-    void Circle(float cx, float cy, float w, float h, Color c) { GUI.color = c; GUI.DrawTexture(new Rect(cx - w / 2, cy - h / 2, w, h), circle); GUI.color = Color.white; }
+    void Box(Rect r, Color c) { GUI.color = c; GUI.DrawTexture(r, white); GUI.color = Color.white; }
+    void Panel(Rect r) { Box(new Rect(r.x - 4, r.y - 4, r.width + 8, r.height + 8), Brown); Box(r, Paper); }
+    void Tex(Rect r, Texture t, Color c) { GUI.color = c; GUI.DrawTexture(r, t); GUI.color = Color.white; }
+    Vector2 S(Vector2 p) => new(Side + p.x * K, p.y * K);
+    Vector2 FromScreen(Vector2 s) => new((s.x - Side) / K, s.y / K);
+    bool Btn(Rect r, string t, GUIStyle s = null) => GUI.Button(r, t, s ?? sBtn);
+    GUIStyle Center(GUIStyle s) => new(s) { alignment = TextAnchor.MiddleCenter };
+
+    void Sprite(Texture2D t, Vector2 feet, float heightImg, bool flip, float bob = 0)
+    {
+        if (t == null) return;
+        float h = heightImg * K, w = h * t.width / t.height;
+        var p = S(feet);
+        Tex(new Rect(p.x - w * 0.45f, p.y - 8, w * 0.9f, 16), circle, new Color(0, 0, 0, 0.25f));
+        var r = new Rect(p.x - w / 2, p.y - h - bob, w, h);
+        if (flip) GUI.DrawTextureWithTexCoords(r, t, new Rect(1, 0, -1, 1)); else GUI.DrawTexture(r, t);
+    }
+
+    // ---------------- GUI ----------------
 
     void OnGUI()
     {
         Styles();
         float s = Mathf.Min(Screen.width / W, Screen.height / H);
-        Rect(0, 0, Screen.width, Screen.height, Navy);
+        Box(new Rect(0, 0, Screen.width, Screen.height), WoodDark);
         GUI.matrix = Matrix4x4.TRS(new Vector3((Screen.width - W * s) / 2, (Screen.height - H * s) / 2, 0), Quaternion.identity, new Vector3(s, s, 1));
-        switch (phase)
+        if (phase == Phase.Loading) { GUI.Label(new Rect(0, 0, W, H), loadError ?? "Loading...", Center(sSide)); return; }
+
+        DrawMap();
+        DrawSide();
+        switch (modal)
         {
-            case Phase.Loading: GUI.Label(new Rect(0, 0, W, H), loadError ?? "Loading...", new GUIStyle(sBody) { alignment = TextAnchor.MiddleCenter }); break;
-            case Phase.Title: DrawTitle(); break;
-            case Phase.Play: DrawPlay(); break;
-            case Phase.Recap: DrawRecap(); break;
+            case Modal.Intro: DrawIntro(); break;
+            case Modal.Info: DrawInfo(); break;
+            case Modal.Villain: DrawVillain(); break;
+            case Modal.Mentor: DrawMentor(); break;
+            case Modal.Recap: DrawRecap(); break;
         }
     }
 
-    void Figure(float x, float floor, float k, Color body, string kind, float bob)
+    void DrawMap()
     {
-        float y = floor - bob;
-        Circle(x, y - 45 * k, 72 * k, 92 * k, body);
-        Circle(x, y - 112 * k, 62 * k, 62 * k, body);
-        float face = kind == "player" ? 8 : -8;
-        Circle(x - 11 * k + face * k, y - 114 * k, 8 * k, 8 * k, Navy);
-        Circle(x + 11 * k + face * k, y - 114 * k, 8 * k, 8 * k, Navy);
-        switch (kind)
+        GUI.DrawTexture(new Rect(Side, 0, W - Side, H), mapTex);
+        var e = Event.current;
+        var mouse = FromScreen(e.mousePosition);
+        bool onMap = e.mousePosition.x > Side && modal == Modal.None;
+
+        for (int i = 0; i < R.clues.Length; i++)
         {
-            case "boss": Rect(x - 5 * k, y - 82 * k, 10 * k, 34 * k, Navy); break;
-            case "hr": Rect(x - 24 * k, y - 116 * k, 48 * k, 3 * k, Navy); break;
-            case "landlord": Rect(x - 34 * k, y - 140 * k, 68 * k, 6 * k, Navy); Rect(x - 20 * k, y - 168 * k, 40 * k, 30 * k, Navy); break;
-            case "mentor": Rect(x - 12 * k, y - 80 * k, 24 * k, 12 * k, Cream); break;
+            if (evidence.Contains(R.clues[i].id)) continue;
+            var p = S(L.clueAt[i]); float pulse = 46 + Mathf.Sin(Time.time * 4 + i) * 8;
+            Tex(new Rect(p.x - pulse, p.y - pulse, pulse * 2, pulse * 2), circle, new Color(1, 0.9f, 0.4f, 0.45f));
+            var b = new Rect(p.x - 13, p.y - 62 + Mathf.Sin(Time.time * 3 + i) * 3, 26, 26);
+            Tex(b, circle, Color.white);
+            GUI.Label(b, "?", new GUIStyle(Center(sText)) { fontStyle = FontStyle.Bold, fontSize = 16 });
+        }
+        if (doorOpen) { var p = S(L.exit); float pulse = 60 + Mathf.Sin(Time.time * 4) * 8; Tex(new Rect(p.x - pulse, p.y - pulse, pulse * 2, pulse * 2), circle, new Color(0.4f, 1, 0.4f, 0.45f)); }
+
+        bool walking = walkTime > 0;
+        var actors = new List<(float y, Action draw)>
+        {
+            (L.villain.y, () => Sprite(villainTex[R.id], L.villain, 200, false, doorOpen ? 0 : Mathf.Abs(Mathf.Sin(Time.time * 2)) * 3)),
+            (player.y, () => Sprite(playerTex, player, 175, faceLeft, walking ? Mathf.Abs(Mathf.Sin(walkTime * 12)) * 6 : 0)),
+            (mentor.y, () => Sprite(mentorTex, mentor, 120, false, Mathf.Sin(Time.time * 2.5f) * 4 + 6)),
+        };
+        foreach (var a in actors.OrderBy(a => a.y)) a.draw();
+
+        var vp = S(L.villain);
+        Label(new Vector2(vp.x, vp.y + 14), VName, Red);
+        var mp = S(mentor);
+        Label(new Vector2(mp.x, mp.y + 12), "Maitre Pocket", Brown);
+        // plumbob
+        var pp = S(player);
+        Tex(new Rect(pp.x - 10, pp.y - 175 * K - 34 + Mathf.Sin(Time.time * 3) * 3, 20, 30), diamond, Green);
+
+        if (modal == Modal.None)
+        {
+            var (_, at) = Next();
+            var tp = S(at); float bob = Mathf.Abs(Mathf.Sin(Time.time * 4)) * 10;
+            float top = at == L.villain ? 200 * K + 40 : at == mentor ? 130 * K + 30 : 90;
+            Tex(new Rect(tp.x - 18, tp.y - top - bob, 36, 30), arrow, Gold);
+        }
+
+        if (!onMap) return;
+        var hit = HitAt(mouse);
+        if (hit.label != null)
+        {
+            var sz = sTip.CalcSize(new GUIContent(hit.label));
+            var r = new Rect(e.mousePosition.x + 14, e.mousePosition.y - 34, sz.x + 20, 28);
+            Box(r, new Color(0.15f, 0.1f, 0.05f, 0.85f)); GUI.Label(r, hit.label, sTip);
+        }
+        if (e.type == EventType.MouseDown && e.button == 0)
+        {
+            if (hit.act == Act.Mentor) DoAct(Act.Mentor, 0);
+            else if (hit.act != Act.None)
+            {
+                pending = hit.act; pendingClue = hit.clue;
+                target = hit.act == Act.Clue ? L.clueStand[hit.clue] : hit.act == Act.Villain ? L.villain + V(-110, 20) : L.exitStand;
+                moving = true;
+            }
+            else { target = mouse; moving = true; pending = Act.None; }
+            e.Use();
         }
     }
 
-    void DrawTitle()
+    void Label(Vector2 at, string t, Color c)
     {
-        GUI.Label(new Rect(0, 110, W, 70), "ESCAPE THE CRAZY BOSS", sBig);
-        Rect(W / 2 - 60, 190, 120, 4, Coral);
-        GUI.Label(new Rect(0, 210, W, 30), "Learn your rights by objecting to absurd villains.", new GUIStyle(sSmall) { fontSize = 20, alignment = TextAnchor.MiddleCenter });
-        string[] steps = { "THEIR CLAIM", "+  A LAW", "+  EVIDENCE", "=  OBJECTION" };
-        string[] sub = { "\"I don't pay overtime.\"", "Overtime must be paid", "Payslip: 47h worked, 35h paid", "Claim broken" };
-        for (int i = 0; i < 4; i++)
-        {
-            float x = 160 + i * 250;
-            Rect(x, 290, 220, 110, i == 3 ? Coral : Panel);
-            GUI.Label(new Rect(x + 16, 302, 200, 24), steps[i], new GUIStyle(sLabel) { fontSize = 14, normal = { textColor = i == 3 ? Navy : Muted } });
-            GUI.Label(new Rect(x + 16, 330, 196, 60), sub[i], new GUIStyle(sBody) { fontSize = 16, normal = { textColor = i == 3 ? Navy : Cream } });
-        }
-        GUI.Label(new Rect(0, 430, W, 30), "Inspect objects to find evidence. Ask your mentor to learn the law. Then object.", new GUIStyle(sSmall) { fontSize = 17, alignment = TextAnchor.MiddleCenter });
-        if (GUI.Button(new Rect(W / 2 - 120, 500, 240, 56), "START", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontSize = 20, fontStyle = FontStyle.Bold })) EnterRoom(0);
+        var st = new GUIStyle(sTip) { fontSize = 12 };
+        var sz = st.CalcSize(new GUIContent(t));
+        var r = new Rect(at.x - sz.x / 2 - 8, at.y, sz.x + 16, 20);
+        Box(r, new Color(c.r, c.g, c.b, 0.9f)); GUI.Label(r, t, st);
     }
 
-    void DrawPlay()
+    void DrawSide()
     {
-        // top bar
-        GUI.Label(new Rect(24, 12, 600, 30), R.title.ToUpper(), new GUIStyle(sLabel) { fontSize = 15 });
-        GUI.Label(new Rect(680, 12, 576, 30), $"CLAIMS BROKEN  {broken.Count}/{R.claims.Length}", new GUIStyle(sLabel) { fontSize = 15, alignment = TextAnchor.UpperRight });
+        Box(new Rect(0, 0, Side, H), Wood);
+        Box(new Rect(Side - 3, 0, 3, H), WoodDark);
+        float x = 14, w = Side - 28, y = 14;
+        GUI.Label(new Rect(x, y, w, 18), $"ROOM {roomIndex + 1} OF {rooms.Length}", sSideHead); y += 18;
+        var title = R.title.Contains(" - ") ? R.title.Substring(R.title.IndexOf(" - ") + 3) : R.title;
+        GUI.Label(new Rect(x, y, w, 26), title, new GUIStyle(sSide) { fontSize = 17, fontStyle = FontStyle.Bold }); y += 34;
 
-        DrawScene();
-        if (queue.Count > 0) DrawDialogue(); else DrawBuilder();
-        if (mentorOpen) DrawMentor();
+        GUI.Label(new Rect(x, y, w, 18), "WHAT TO DO NOW", sSideHead); y += 20;
+        var next = Next().text;
+        float nh = sText.CalcHeight(new GUIContent(next), w - 16) * 0.85f + 16;
+        Box(new Rect(x, y, w, nh), Paper);
+        Box(new Rect(x, y, 4, nh), Green);
+        GUI.Label(new Rect(x + 10, y + 6, w - 14, nh - 8), next, new GUIStyle(sText) { fontSize = 14, fontStyle = FontStyle.Bold });
+        y += nh + 16;
 
-        if (objectionFlash > 0)
+        GUI.Label(new Rect(x, y, w, 18), $"CLAIMS TO BREAK  {broken.Count}/{R.need}", sSideHead); y += 20;
+        foreach (var c in R.claims)
         {
-            GUI.color = new Color(1, 1, 1, Mathf.Clamp01(objectionFlash * 2));
-            GUI.Label(new Rect(0, 150, W, 120), "OBJECTION!", sAccent);
-            GUI.color = Color.white;
+            bool done = broken.Contains(c.id);
+            var txt = talked ? (done ? "BROKEN - " : "") + "\"" + c.text + "\"" : "???";
+            var st = new GUIStyle(sSide) { fontSize = 12, normal = { textColor = done ? Hex("#9FD98A") : Paper } };
+            float h = st.CalcHeight(new GUIContent(txt), w - 14);
+            Tex(new Rect(x, y + 3, 9, 9), circle, done ? Green : Soft);
+            GUI.Label(new Rect(x + 14, y, w - 14, h), txt, st); y += h + 6;
         }
-        if (toastTime > 0 && toast != null)
-        {
-            GUI.color = new Color(1, 1, 1, Mathf.Clamp01(toastTime));
-            var sz = sBody.CalcSize(new GUIContent(toast));
-            Rect(W / 2 - sz.x / 2 - 16, 60, sz.x + 32, 36, Coral);
-            GUI.Label(new Rect(W / 2 - sz.x / 2, 66, sz.x + 10, 30), toast, new GUIStyle(sBody) { fontSize = 16, normal = { textColor = Navy } });
-            GUI.color = Color.white;
-        }
+        y += 10;
+        GUI.Label(new Rect(x, y, w, 18), "YOUR CASE FILE", sSideHead); y += 20;
+        GUI.Label(new Rect(x, y, w, 20), $"Evidence found:  {evidence.Count}/{R.clues.Length}", sSide); y += 20;
+        GUI.Label(new Rect(x, y, w, 20), $"Law cards:  {cards.Count}/{R.cards.Length}", sSide); y += 30;
+
+        GUI.enabled = modal == Modal.None;
+        if (Btn(new Rect(x, H - 112, w, 40), "Ask Maitre Pocket", Center(sBtnSel))) DoAct(Act.Mentor, 0);
+        if (Btn(new Rect(x, H - 64, w, 40), "How to play", Center(sBtn))) modal = Modal.Intro;
+        GUI.enabled = true;
     }
 
-    void DrawScene()
+    Rect Dim()
     {
-        Rect(0, SceneTop, W, Floor - SceneTop, Panel);
-        Rect(0, Floor, W, 2, Line);
-        // door
-        Rect(1150, Floor - 190, 90, 190, doorOpen ? Navy : Line);
-        if (!doorOpen) Circle(1225, Floor - 95, 10, 10, Muted);
-        else GUI.Label(new Rect(1150, Floor - 220, 90, 24), "EXIT  >", new GUIStyle(sLabel) { alignment = TextAnchor.MiddleCenter, normal = { textColor = Coral } });
+        Box(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.45f));
+        var r = new Rect(240, 40, 1000, 640); Panel(r); return r;
+    }
 
-        var near = queue.Count == 0 ? NearClue() : null;
-        for (int i = 0; i < R.clues.Length && i < ClueX.Length; i++)
+    void DrawIntro()
+    {
+        var r = new Rect(330, 80, 820, 560);
+        Box(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.45f)); Panel(r);
+        float x = r.x + 40, w = r.width - 80, y = r.y + 30;
+        if (roomIndex == 0) { GUI.Label(new Rect(x, y, w, 36), "ESCAPE THE CRAZY BOSS", Center(sTitle)); y += 40; }
+        GUI.Label(new Rect(x, y, w, 26), R.title, Center(new GUIStyle(sHead) { fontSize = 18 })); y += 34;
+        float ih = sText.CalcHeight(new GUIContent(R.intro), w);
+        GUI.Label(new Rect(x, y, w, ih), R.intro, sText); y += ih + 20;
+        GUI.Label(new Rect(x, y, w, 20), "HOW TO WIN", sHead); y += 26;
+        string[] steps =
         {
-            var c = R.clues[i]; float x = ClueX[i];
-            Rect(x - 60, Floor - 70, 120, 8, Line);
-            Rect(x - 52, Floor - 62, 6, 62, Line); Rect(x + 46, Floor - 62, 6, 62, Line);
-            Rect(x - 16, Floor - 112, 32, 42, evidence.Contains(c.id) ? Muted : Cream);
-            if (!evidence.Contains(c.id)) Circle(x, Floor - 132 + Mathf.Sin(Time.time * 3 + i) * 4, 12, 12, Coral);
-            GUI.Label(new Rect(x - 90, Floor + 8, 180, 22), (near == c ? "[E] " : "") + c.label, new GUIStyle(sLabel) { alignment = TextAnchor.MiddleCenter, normal = { textColor = near == c ? Coral : Muted } });
-            var hit = new Rect(x - 70, Floor - 150, 140, 190);
-            if (queue.Count == 0 && !mentorOpen && Event.current.type == EventType.MouseDown && hit.Contains(Event.current.mousePosition))
-            { walkTarget = x; pendingInspect = c; Event.current.Use(); }
+            "Search the glowing objects (?) to collect EVIDENCE.",
+            "Click Maitre Pocket, the little lawyer next to you, to learn the LAW. Each answer can give you a law card.",
+            $"Talk to {VName}. Pick one of his claims + the law that contradicts it + the evidence that proves it, then press OBJECTION!",
+        };
+        for (int i = 0; i < 3; i++)
+        {
+            Tex(new Rect(x, y, 34, 34), circle, Green);
+            GUI.Label(new Rect(x, y, 34, 34), (i + 1).ToString(), new GUIStyle(sTip) { fontSize = 18 });
+            float h = Mathf.Max(34, sText.CalcHeight(new GUIContent(steps[i]), w - 50));
+            GUI.Label(new Rect(x + 50, y + 4, w - 50, h), steps[i], sText); y += h + 12;
+        }
+        GUI.Label(new Rect(x, y + 4, w, 20), "Click on the floor to walk (or use WASD / arrow keys). Mistakes are fine: the mentor explains them.", sSmall);
+        if (Btn(new Rect(r.center.x - 110, r.yMax - 70, 220, 50), roomIndex == 0 && !talked && evidence.Count == 0 ? "START" : "GOT IT", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontSize = 20, fontStyle = FontStyle.Bold })) modal = Modal.None;
+    }
+
+    void DrawInfo()
+    {
+        float bodyH = sText.CalcHeight(new GUIContent(infoBody), 560);
+        float exH = infoExtra == null ? 0 : sText.CalcHeight(new GUIContent(infoExtra), 540) + 30;
+        var r = new Rect(390, 0, 640, 150 + bodyH + exH); r.y = (H - r.height) / 2;
+        Box(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.45f)); Panel(r);
+        GUI.Label(new Rect(r.x + 40, r.y + 24, 560, 26), infoTitle, sHead);
+        GUI.Label(new Rect(r.x + 40, r.y + 54, 560, bodyH), infoBody, sText);
+        if (infoExtra != null)
+        {
+            var er = new Rect(r.x + 40, r.y + 66 + bodyH, 560, exH - 14);
+            Box(er, Hex("#E3F2D6")); Box(new Rect(er.x, er.y, 4, er.height), Green);
+            GUI.Label(new Rect(er.x + 14, er.y + 8, 540, er.height - 8), infoExtra, sText);
+        }
+        if (Btn(new Rect(r.center.x - 80, r.yMax - 64, 160, 44), "OK", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontSize = 18, fontStyle = FontStyle.Bold })) modal = Modal.None;
+    }
+
+    void DrawVillain()
+    {
+        var r = Dim();
+        var vt = villainTex[R.id];
+        float pw = 230, ph = Mathf.Min(330, pw * vt.height / vt.width); pw = ph * vt.width / vt.height;
+        GUI.DrawTexture(new Rect(r.x + 130 - pw / 2, r.y + 390 - ph, pw, ph), vt);
+        Label(new Vector2(r.x + 130, r.y + 400), R.villain.name, Red);
+        float x = r.x + 270, w = r.width - 300, y = r.y + 24;
+
+        // speech bubble
+        float bh = Mathf.Max(60, sText.CalcHeight(new GUIContent(villainLine), w - 30) + 24);
+        Box(new Rect(x, y, w, bh), Color.white); Box(new Rect(x, y, 4, bh), Red);
+        GUI.Label(new Rect(x + 16, y + 10, w - 30, bh - 12), busy ? "..." : villainLine, sText);
+        y += bh + 12;
+
+        if (verdict != 0 && mentorLine != null)
+        {
+            var head = verdict == 1 ? "OBJECTION SUSTAINED - Maitre Pocket explains:" : "OBJECTION OVERRULED - Maitre Pocket explains:";
+            float mh = sText.CalcHeight(new GUIContent(mentorLine), w - 90) + 40;
+            Box(new Rect(x, y, w, mh), verdict == 1 ? Hex("#E3F2D6") : Hex("#F8E0D8"));
+            GUI.DrawTexture(new Rect(x + 8, y + 8, 50, 50 * mentorTex.height / mentorTex.width > 70 ? 70 : 50), mentorTex, ScaleMode.ScaleToFit);
+            GUI.Label(new Rect(x + 70, y + 8, w - 80, 20), head, new GUIStyle(sHead) { normal = { textColor = verdict == 1 ? Green : Red } });
+            GUI.Label(new Rect(x + 70, y + 30, w - 90, mh - 30), mentorLine, sText);
+            y += mh + 12;
         }
 
-        bool walking = walkTarget >= 0 || Mathf.Abs(Input.GetAxisRaw("Horizontal")) > 0;
-        float bob = walking ? Mathf.Abs(Mathf.Sin(Time.time * 12)) * 6 : 0;
-        string vk = R.id == "boss" ? "boss" : R.id == "hr" ? "hr" : "landlord";
-        Figure(villainX, Floor, 1.15f, Coral, vk, doorOpen ? 0 : Mathf.Abs(Mathf.Sin(Time.time * 2)) * 3);
-        GUI.Label(new Rect(villainX - 100, Floor + 8, 200, 22), R.villain.name, new GUIStyle(sLabel) { alignment = TextAnchor.MiddleCenter, normal = { textColor = Coral } });
-        Figure(playerX, Floor, 1f, Cream, "player", bob);
-        Figure(playerX - 70, Floor - 70 + Mathf.Sin(Time.time * 2.5f) * 6, 0.45f, Muted, "mentor", 0);
-        if (queue.Count == 0)
-            GUI.Label(new Rect(24, SceneTop + 12, 700, 24), doorOpen ? "Walk right to leave ->" : "A / D to walk  -  click or press E on an object to inspect it", sSmall);
-    }
-
-    void DrawDialogue()
-    {
-        var l = queue[0];
-        Rect(0, PanelTop, W, H - PanelTop, Navy);
-        Rect(80, PanelTop + 30, 4, 140, l.color);
-        GUI.Label(new Rect(104, PanelTop + 26, 900, 28), string.IsNullOrEmpty(l.who) ? "" : l.who.ToUpper(), new GUIStyle(sLabel) { fontSize = 15, normal = { textColor = l.color } });
-        int n = Mathf.Min(l.text.Length, (int)typed);
-        GUI.Label(new Rect(104, PanelTop + 58, 1080, 160), l.text.Substring(0, n), new GUIStyle(sBody) { fontSize = 22 });
-        GUI.Label(new Rect(104, H - 46, 1080, 24), queue.Count > 1 ? $"click to continue  ({queue.Count - 1} more)" : "click to continue", sSmall);
-        if (!mentorOpen && Event.current.type == EventType.MouseDown && Event.current.mousePosition.y > SceneTop) { Advance(); Event.current.Use(); }
-    }
-
-    void DrawBuilder()
-    {
-        Rect(0, PanelTop, W, H - PanelTop, Navy);
-        GUI.Label(new Rect(24, PanelTop + 6, 900, 24), "BUILD YOUR OBJECTION:  pick 1 claim  +  1 law  +  1 piece of evidence", new GUIStyle(sLabel) { fontSize = 14, normal = { textColor = Cream } });
-        float y0 = PanelTop + 36, colW = 380, bh = 40;
-        string[] heads = { "1  WHAT " + R.villain.name.Split(',')[0].ToUpper() + " CLAIMS", "2  YOUR LAW CARDS", "3  YOUR EVIDENCE" };
+        // builder
+        GUI.Label(new Rect(x, y, w, 20), "BUILD YOUR OBJECTION", new GUIStyle(sHead) { fontSize = 15 }); y += 24;
+        float cw = (w - 24) / 3, top = y, bottom = r.yMax - 80;
+        string[] heads = { "1. HIS CLAIM", "2. THE LAW THAT SAYS NO", "3. YOUR PROOF" };
         for (int col = 0; col < 3; col++)
         {
-            float x = 24 + col * (colW + 22);
-            GUI.Label(new Rect(x, y0, colW, 20), heads[col], sLabel);
-            float y = y0 + 24;
+            float cx = x + col * (cw + 12), cy = top;
+            GUI.Label(new Rect(cx, cy, cw, 20), heads[col], sHead); cy += 22;
             if (col == 0)
                 foreach (var c in R.claims)
                 {
                     bool done = broken.Contains(c.id);
-                    var st = done ? sBtnDone : selClaim == c.id ? sBtnSel : sBtn;
-                    if (GUI.Button(new Rect(x, y, colW, bh), (done ? "BROKEN  " : "") + "\"" + c.text + "\"", st) && !done) { selClaim = selClaim == c.id ? null : c.id; }
-                    y += bh + 6;
+                    if (Btn(new Rect(cx, cy, cw, 54), (done ? "BROKEN: " : "") + "\"" + c.text + "\"", done ? sBtnOff : selClaim == c.id ? sBtnSel : sBtn) && !done) selClaim = c.id;
+                    cy += 58;
                 }
             else if (col == 1)
             {
                 foreach (var c in R.cards.Where(c => cards.Contains(c.id)))
                 {
-                    if (GUI.Button(new Rect(x, y, colW, 34), c.title, selCard == c.id ? sBtnSel : sBtn)) { selCard = selCard == c.id ? null : c.id; detail = selCard == null ? null : c.title + ": " + c.plain + "  (" + c.law + ")"; }
-                    y += 38;
+                    if (Btn(new Rect(cx, cy, cw, 40), c.title, selCard == c.id ? sBtnSel : sBtn)) selCard = c.id;
+                    cy += 44;
                 }
-                int locked = R.cards.Length - cards.Count;
-                if (locked > 0) { GUI.Label(new Rect(x, y, colW, 40), $"{locked} card(s) left to discover. Inspect objects or ask the mentor.", sSmall); }
+                if (cards.Count < R.cards.Length) GUI.Label(new Rect(cx, cy, cw, 60), cards.Count == 0 ? "No law cards yet. Ask Maitre Pocket or inspect objects." : "Missing a law? Ask Maitre Pocket.", sSmall);
             }
             else
             {
                 foreach (var c in R.clues.Where(c => evidence.Contains(c.id)))
                 {
-                    if (GUI.Button(new Rect(x, y, colW, 34), c.label, selEvidence == c.id ? sBtnSel : sBtn)) { selEvidence = selEvidence == c.id ? null : c.id; detail = selEvidence == null ? null : c.label + ": " + c.text; }
-                    y += 38;
+                    if (Btn(new Rect(cx, cy, cw, 40), c.label, selEvidence == c.id ? sBtnSel : sBtn)) selEvidence = c.id;
+                    cy += 44;
                 }
-                if (evidence.Count < R.clues.Length) GUI.Label(new Rect(x, y, colW, 40), "Inspect objects in the room to collect evidence.", sSmall);
+                if (evidence.Count < R.clues.Length) GUI.Label(new Rect(cx, cy, cw, 60), evidence.Count == 0 ? "No evidence yet. Search the glowing objects in the room." : "More evidence is hidden in the room.", sSmall);
             }
         }
-        Rect(24, H - 64, W - 48, 1, Line);
-        GUI.Label(new Rect(24, H - 58, 820, 54), detail ?? "Tip: click a law card or a piece of evidence to read what it means.", new GUIStyle(sSmall) { fontSize = 14, normal = { textColor = detail != null ? Cream : Muted } });
-        if (GUI.Button(new Rect(860, H - 54, 170, 44), "ASK MENTOR", new GUIStyle(sBtn) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold })) mentorOpen = !mentorOpen;
+
+        // selected card explanation
+        var sel = selCard != null ? R.cards.First(c => c.id == selCard) : null;
+        if (sel != null) GUI.Label(new Rect(x, bottom - 40, w - 470, 110), "<b>" + sel.title + ":</b> " + sel.plain, new GUIStyle(sSmall) { fontSize = 13, normal = { textColor = Ink } });
+
+        if (Btn(new Rect(r.xMax - 450, r.yMax - 64, 130, 44), "Ask mentor", Center(sBtn))) modal = Modal.Mentor;
+        if (Btn(new Rect(r.xMax - 310, r.yMax - 64, 100, 44), "Leave", Center(sBtn))) modal = Modal.None;
         bool ready = selClaim != null && selCard != null && selEvidence != null && !busy;
-        int picked = (selClaim != null ? 1 : 0) + (selCard != null ? 1 : 0) + (selEvidence != null ? 1 : 0);
-        if (GUI.Button(new Rect(1040, H - 54, 216, 44), busy ? "..." : ready ? "OBJECTION!" : $"OBJECTION  {picked}/3", new GUIStyle(ready ? sBtnSel : sBtn) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, fontSize = 18, normal = { background = (ready ? sBtnSel : sBtn).normal.background, textColor = ready ? Navy : Muted } }) && ready) Object();
+        int n = (selClaim != null ? 1 : 0) + (selCard != null ? 1 : 0) + (selEvidence != null ? 1 : 0);
+        if (Btn(new Rect(r.xMax - 200, r.yMax - 64, 180, 44), busy ? "..." : ready ? "OBJECTION!" : $"pick {3 - n} more", ready ? sBtnGo : Center(sBtnOff)) && ready) Object();
     }
 
     void DrawMentor()
     {
-        var r = new Rect(780, SceneTop + 8, 476, Floor - SceneTop + 40);
-        Rect(r.x, r.y, r.width, r.height, Navy);
-        Rect(r.x, r.y, 4, r.height, Cream);
-        GUI.Label(new Rect(r.x + 20, r.y + 10, 300, 24), "MAITRE POCKET  -  your mentor", new GUIStyle(sLabel) { fontSize = 14, normal = { textColor = Cream } });
-        if (GUI.Button(new Rect(r.xMax - 70, r.y + 8, 60, 26), "close", new GUIStyle(sChip) { alignment = TextAnchor.MiddleCenter })) mentorOpen = false;
-        GUILayout.BeginArea(new Rect(r.x + 20, r.y + 42, r.width - 30, 190));
-        mentorScroll = GUILayout.BeginScrollView(mentorScroll);
-        foreach (var m in mentorLog)
+        var r = Dim();
+        float ph = 300, pw = ph * mentorTex.width / mentorTex.height;
+        GUI.DrawTexture(new Rect(r.x + 130 - pw / 2, r.y + 70, pw, ph), mentorTex);
+        Label(new Vector2(r.x + 130, r.y + 390), "Maitre Pocket", Brown);
+        GUI.Label(new Rect(r.x + 30, r.y + 420, 200, 120), "Your pocket lawyer. Ask him anything in plain words. Good questions give you law cards.", sSmall);
+        float x = r.x + 270, w = r.width - 300;
+        GUI.Label(new Rect(x, r.y + 20, w, 22), "ASK MAITRE POCKET", new GUIStyle(sHead) { fontSize = 15 });
+        if (Btn(new Rect(r.xMax - 110, r.y + 14, 90, 32), "Close", Center(sBtn))) modal = Modal.None;
+
+        var area = new Rect(x, r.y + 52, w, 380);
+        Box(area, Hex("#F7EBD0"));
+        GUILayout.BeginArea(new Rect(area.x + 10, area.y + 10, area.width - 20, area.height - 20));
+        chatScroll = GUILayout.BeginScrollView(chatScroll);
+        foreach (var (me, text) in chat)
         {
-            GUILayout.Label(m.who.ToUpper(), new GUIStyle(sLabel) { normal = { textColor = m.color == Cream ? Cream : Muted } });
-            GUILayout.Label(m.text, new GUIStyle(sBody) { fontSize = 15, normal = { textColor = m.color } });
+            GUILayout.BeginHorizontal();
+            if (me) GUILayout.FlexibleSpace();
+            var st = new GUIStyle(sText) { fontSize = 15, padding = new RectOffset(12, 12, 8, 8), normal = { background = Solid(me ? Hex("#DCEFD0") : Color.white), textColor = Ink } };
+            GUILayout.Label(text, st, GUILayout.MaxWidth(w * 0.78f));
+            if (!me) GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
             GUILayout.Space(6);
         }
-        if (busy) GUILayout.Label("thinking...", sSmall);
+        if (busy) GUILayout.Label("Maitre Pocket is thinking...", sSmall);
         GUILayout.EndScrollView();
         GUILayout.EndArea();
-        float y = r.y + 238;
+
+        float y = area.yMax + 10;
+        GUI.Label(new Rect(x, y, w, 18), "SUGGESTED QUESTIONS", sHead); y += 22;
         foreach (var q in R.questions.Where(q => !asked.Contains(q)).Take(3))
         {
-            if (GUI.Button(new Rect(r.x + 20, y, r.width - 30, 26), q, sChip)) AskMentor(q);
-            y += 30;
+            if (Btn(new Rect(x, y, w, 28), q, new GUIStyle(sBtn) { fontSize = 13, padding = new RectOffset(10, 8, 2, 2) }) && !busy) AskMentor(q);
+            y += 32;
         }
-        bool enter = Event.current.type == EventType.KeyDown && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter) && GUI.GetNameOfFocusedControl() == "ask";
-        if (enter) { AskMentor(mentorInput); Event.current.Use(); }
+        var e = Event.current;
+        if (e.type == EventType.KeyDown && (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter) && GUI.GetNameOfFocusedControl() == "ask") { AskMentor(mentorInput); e.Use(); }
         GUI.SetNextControlName("ask");
-        mentorInput = GUI.TextField(new Rect(r.x + 20, r.yMax - 46, r.width - 110, 36), mentorInput, 300, sField);
-        if (GUI.Button(new Rect(r.xMax - 82, r.yMax - 46, 72, 36), "ASK", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold })) AskMentor(mentorInput);
+        mentorInput = GUI.TextField(new Rect(x, r.yMax - 58, w - 110, 40), mentorInput, 300, sField);
+        if (string.IsNullOrEmpty(mentorInput)) GUI.Label(new Rect(x + 10, r.yMax - 52, w - 120, 30), "Type your own question...", sSmall);
+        if (Btn(new Rect(r.xMax - 130, r.yMax - 58, 100, 40), "ASK", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold })) AskMentor(mentorInput);
     }
 
     void DrawRecap()
     {
-        GUI.Label(new Rect(0, 40, W, 70), "YOU ESCAPED", sBig);
-        Rect(W / 2 - 60, 112, 120, 4, Coral);
-        GUI.Label(new Rect(0, 124, W, 28), $"{learned.Count} claims broken  -  {mistakes} overruled objections", new GUIStyle(sSmall) { fontSize = 17, alignment = TextAnchor.MiddleCenter });
-        GUILayout.BeginArea(new Rect(180, 170, 920, 450));
-        mentorScroll = GUILayout.BeginScrollView(mentorScroll);
-        GUILayout.Label("WHAT YOU LEARNED", sLabel);
-        foreach (var l in learned)
+        var r = Dim();
+        GUI.Label(new Rect(r.x, r.y + 24, r.width, 40), "YOU ESCAPED!", Center(sTitle));
+        GUI.Label(new Rect(r.x, r.y + 66, r.width, 24), $"{learned.Count} claims broken  -  {mistakes} overruled objections (that's how you learn)", Center(sSmall));
+        GUILayout.BeginArea(new Rect(r.x + 50, r.y + 110, r.width - 100, r.height - 190));
+        recapScroll = GUILayout.BeginScrollView(recapScroll);
+        GUILayout.Label("WHAT YOU LEARNED", sHead);
+        foreach (var (claim, card) in learned)
         {
-            GUILayout.Space(8);
-            GUILayout.Label("They said: \"" + l.claim + "\"", sSmall);
-            GUILayout.Label("<b>" + l.card.title + "</b>  <color=#8C99AB>" + l.card.law + "</color>", sBody);
-            GUILayout.Label(l.card.plain, new GUIStyle(sBody) { fontSize = 15 });
+            GUILayout.Space(10);
+            GUILayout.Label("They said: \"" + claim + "\"", sSmall);
+            GUILayout.Label("<b>" + card.title + "</b>  <color=#8A7457>" + card.law + "</color>", sText);
+            GUILayout.Label(card.plain, new GUIStyle(sText) { fontSize = 15 });
         }
-        GUILayout.Space(12);
+        GUILayout.Space(14);
         GUILayout.Label("Simplified for learning. For a real case, talk to a lawyer or a free legal aid service.", sSmall);
         GUILayout.EndScrollView();
         GUILayout.EndArea();
-        if (GUI.Button(new Rect(W / 2 - 110, 640, 220, 50), "PLAY AGAIN", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold }))
+        if (Btn(new Rect(r.center.x - 110, r.yMax - 66, 220, 48), "PLAY AGAIN", new GUIStyle(sBtnSel) { alignment = TextAnchor.MiddleCenter, fontSize = 18, fontStyle = FontStyle.Bold }))
         { learned.Clear(); mistakes = 0; EnterRoom(0); }
     }
 }
